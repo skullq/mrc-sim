@@ -392,6 +392,25 @@ sequenceDiagram
   [TX -> RX DATA]    송신단은 도착한 PULL 패킷(pull_no: 25)을 크레딧으로 소비하여 DATA (psn: 25, ev: 0x05) 1개 발송!
   ```
 
+### 4.1. 평상시 RTT 및 큐잉 지연 측정 메커니즘 (송신 `_tx_bitmap` ↔ `UecAckPacket` 왕복 매칭)
+* **핵심 특징**: 일반 UEC 데이터 패킷(`DATA_PULL`, `DATA_SPEC`, `DATA_RTX`) 및 `DATA_PROBE` 헤더 자체에는 송신 시각(`timestamp`) 필드가 들어가지 않습니다(`uecpacket.h`). 대신 송신단(`UecSrc`)이 로컬 메모리에 보낸 시각을 기록해 두고, 수신단이 되돌려 보내는 **`UecAckPacket`**의 `acked_psn`과 매칭하여 매 정상 `ACK`마다 RTT와 큐잉 지연(`delay`)을 계산합니다(`uec.cpp`).
+* **1단계 — 송신단 로컬 기록 (`UecSrc::createSendRecord`)**:
+  * `UecDataPacket` 또는 `UecRtsPacket` 전송 시 로컬 맵 **`_tx_bitmap[psn]`**에 `(path_id, full_pkt_size, send_time = now())`를 저장합니다.
+  * `DATA_PROBE` 패킷 전송 시에는 `_tx_bitmap` 대신 **`_probe_send_time`**과 `_probe_seqno`를 별도 기록합니다.
+* **2단계 — 수신단의 응답 패킷 형태 (`UecAckPacket`, `UecSink::sack`)**:
+  * 수신단은 정상(비-Trim) 패킷을 받으면 **고정 `64B` 고우선순위(`PRIO_HI`) 제어 패킷인 `UecAckPacket` (`type=UECACK`)**을 생성해 송신단으로 반송합니다.
+  ```text
+  [RX -> TX ACK] UecAckPacket | Size: 64B | Prio: HIGH | Type: UECACK
+                 ├─ acked_psn: 25        (방금 수신해 이 ACK을 유발한 개별 PSN -> _tx_bitmap 조회 키)
+                 ├─ cumulative_ack: 24   (순서대로 완료된 누적 ACK)
+                 ├─ ref_ack + sack_bitmap: 64-bit 비순차 수신 비트맵
+                 ├─ ev: 0x05             (수신 데이터 패킷의 Path ID / EV 에코)
+                 └─ flags: ecn_echo(0/1), rtx_echo(0/1), is_rts(0/1), is_probe_ack(0/1)
+  ```
+* **3단계 — 송신단 RTT/Delay 산출 (`UecSrc::processAck`)**:
+  * 일반 ACK(`!is_probe_ack`): `acked_psn`으로 `_tx_bitmap`에서 `send_time`을 조회해 **`raw_rtt = now() - send_time`**을 계산하고, `_base_rtt` 갱신 후 **`delay = raw_rtt - _base_rtt`**를 산출해 NSCC 혼잡 제어(`cwnd`)에 반영합니다.
+  * Probe ACK(`is_probe_ack=1`): `acked_psn == _probe_seqno`일 때 **`now() - _probe_send_time`**으로 경로 지연을 재측정합니다.
+
 ---
 
 ## 5. 전 기능 검증을 위한 10대 자동화 테스트 시나리오 상세 명세 (Automated Test Suite: TC-01 ~ TC-10)
@@ -826,5 +845,28 @@ No.  Time(us)   Source       Destination  Protocol  Len   Info
 | **Phase 3** | **다중 경로 알고리즘 및 링크 블랙홀/PFLD 검증 (`TC-04 ~ TC-05`)** | • **`TC-04`**: 비대칭/혼잡 토폴로지에서 4대 멀티패스 알고리즘(`Oblivious`, `Bitmap`, `REPS`, `Mixed`) 성능 및 경로 수렴도 비교<br/>• **`TC-05`**: 물리적 링크 단절(Blackhole)로 Trimmed 패킷마저 증발(무-NACK)했을 때 **REPS Freezing** 및 **PFLD/Sleek (`OoO SACK` 임계치 + `Probe`)** 복구 검증 | `configs/traffic/tc04~05.cm`, 경로 분포 및 복구 리포트 |
 | **Phase 4** | **혼잡 제어(RCCC/SMaRTT) 및 풀 스택/SONiC 코너 케이스 검증 (`TC-06 ~ TC-09`)** | • **`TC-06`**: RCCC(Receiver-driven `PULL` Pacing / EQDS 모드) 기반 Incast 큐 억제 검증<br/>• **`TC-07`**: SMaRTT 멀티 시그널(`ECN+Delay`), `QuickAdapt`, `FastIncrease`, `CSIG` 검증<br/>• **`TC-08`**: UEC 풀 스택 하이브리드(`NSCC + RCCC + REPS + Trimming + PFLD`) All-to-All 종합 스트레스 테스트<br/>• **`TC-09`**: SONiC/SAI 스위치 코너 케이스(`TC-09a` Trim 큐 포화 `DROPDTT`, `TC-09b` Double-Trim 방지 및 소형 패킷 예외, `TC-09c` 스위치 `ARS` vs 호스트 `REPS`, `TC-09d` 스위치 `BTS` 직접 반사) 검증 | `configs/traffic/tc06~09.cm`, `scripts/run_all_tests.py` 종합 리포트 |
 | **Phase 5** | **P4 & 하드웨어 RTL 주입용 `.pcap` / `.tv` 골든 벡터 생성 (`TC-10`)** | • **`TC-10`**: `TC-01 ~ TC-09`의 모든 패킷 트레이스를 6.2절 64B 비트 정합 규격에 맞춘 **3종 `.pcap` 파일(`switch_ingress.pcap`, `switch_egress.pcap`, `end_to_end_full.pcap`)** 및 **AXI-Stream `.tv` 벡터**로 변환<br/>• Wireshark 디섹터(`mrc_uet.lua`) 및 P4 참조 코드(`mrc_headers.p4`, `mrc_switch_trim.p4`) 생성 및 비트 정합성 최종 확인 | `scripts/export_hw_vectors.py`, `p4_hw_ref/*`, `reports/*.pcap` |
+
+---
+
+## 9. 웹 기반 Topology Studio, 장애 복구 및 다중 헤더 뷰 명세 (`web_dashboard.py`)
+
+### 9.1. Flow Size 기반 실행 & 3단계 타임라인 (`BEFORE FAIL` / `AFTER FAIL` / `RECOVERED`)
+- 대시보드 `Topology Builder`는 고정 종료 시간(`Max Test Time`) 대신 **Flow Size (`512 KB ~ 16 MB`, `-flowsize_kb`)** 를 기준으로 시뮬레이션을 수행하며, 모든 Flow 완료 시 자동 종료됩니다.
+- **장애 및 복구 타임라인 분할**:
+  - `Recover At = 0` (영구 장애): `BEFORE FAIL` → `AFTER FAIL` 2단계로 프레임을 분할합니다.
+  - `Recover At > 0` (일시 장애 후 복구): `BEFORE FAIL` → `AFTER FAIL` → **`RECOVERED`** 3단계로 프레임을 분할하며, `RECOVERED` 구간에서는 장애 노드/링크의 빨간 표시가 해제되고 복구 후 트래픽 재유입 상태를 분리 관측합니다.
+
+### 9.2. Wireshark 패킷 상세 Header View 선택기 (`#wsHeaderView`)
+패킷 상세 패널에서 동일한 시뮬레이션 패킷을 아래 3가지 프로토콜 관점으로 전환해 계층 트리 및 Hex 덤프를 확인할 수 있습니다:
+1. **`UEC v1.0 UET (PDS/CMS)`** *(기본값)*: `Rail L2` + `IPv4` 또는 `IPv6+SRv6 (SRH 104B / uSID 94B)` + `UEC Transport / MRC Header (PSN, EV, Trim, RTT)`
+2. **`RoCEv2 / RDMA (BTH + Ext BTH)`**:
+   - `IPv4 + UDP (SrcPort=EV 해시, DstPort=4791 / 0x12b7)`
+   - **IB BTH (`12B`)**: `OpCode` (`0x0A` `RC RDMA_WRITE_ONLY` / `0x11` `RC ACK`), `P_Key=0xFFFF`, `DestQP`, `AckReq`, `PSN (24-bit)`
+   - **Extended BTH**: 데이터 패킷은 **RETH (`16B`: `VA` 8B + `R_Key` 4B + `DMALen` 4B)**, ACK/NACK 패킷은 **AETH (`4B`: `Syndrome` + `MSN`)** 를 계층 트리와 Hex 덤프에 직렬화하고 `MPRDMA / REPS` 멀티패스 확장(`EV`, `Plane`, `Trim`)을 함께 표시
+3. **`UEC v1.1 (UFH 12B-MAC + CSIG)`** *(프리뷰)*:
+   - UEC v1.1의 **UFH (`12B` Compact MAC, `-20B` 헤더 절감, `80B` 고정 IPG)**, **CSIG (`4B/8B` 스위치 인밴드 큐 지연/가용 대역폭 텔레메트리)**, **PCM (`Programmable Congestion Management`)** 구조를 시각화합니다. *(참고: `htsim_uec`에서 UFH 오버헤드/CSIG 에코/PCM CC 모델링은 확장 가능하나, Scale-Up용 PFC/CBFC 크레딧 패브릭 및 INC 하드웨어 리덕션은 별도 C++ 모듈 구현 필요)*
+
+### 9.3. Playwright E2E 무결성 검증 스위트
+- [playwright_e2e_verify.py](file:///root/mrc-sim/tests/playwright_e2e_verify.py)는 `All-to-All`, `Incast`, `Node/Leaf/Link/Uplink 장애`, `Fault Recovery (RECOVERED)`, `SRv6 (SRH/uSID)`, `100G/400G`, `Multipath Algo (freezing/oblivious/bitmap/mixed)` 전반에 대해 **CSV 트레이스와 대시보드 UI 수치·차트·SVG 정합성 41개 항목**을 자동 검증합니다.
 
 > 시뮬레이터 실행 방법, 웹 대시보드 운영 가이드, 100G/400G 기준값 및 `CompositeQueue` 구현 세부 동작은 [README.md](file:///root/mrc-sim/README.md)를 참고하세요.

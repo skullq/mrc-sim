@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import threading
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -165,33 +166,47 @@ HTML_PAGE = """<!DOCTYPE html>
   <!-- TAB 2: Topology Builder & Fault Injection -->
   <div id="tab-topo" class="panel active">
     <div class="card" style="margin-bottom:14px">
-      <h2>1. Auto-Calculate Fat-Tree Topology</h2>
+      <h2>1. Topology &amp; Traffic Simulation Config</h2>
+      <details style="margin-bottom:10px; background:#0f172a; border:1px solid #334155; border-radius:6px; padding:6px 10px;">
+        <summary class="mono" style="cursor:pointer; font-size:0.8rem; color:#94a3b8;">고정 토폴로지 사양: 8 xPUs × 8 Planes | Rail-Optimized | 2-Tier Leaf-Spine (클릭해 상세 보기)</summary>
+        <div class="form-row" style="margin-top:8px; margin-bottom:0;">
+          <div class="field">
+            <label>xPUs (Nodes)</label>
+            <input type="number" id="inNodes" value="8" min="8" max="8" readonly style="opacity:0.75;cursor:not-allowed" />
+          </div>
+          <div class="field">
+            <label>Ports / xPU (Planes)</label>
+            <input type="number" id="inXpusPerNode" value="8" min="8" max="8" readonly style="opacity:0.75;cursor:not-allowed" />
+          </div>
+          <div class="field">
+            <label>Wiring Mode (Fixed)</label>
+            <select id="inMode" disabled style="opacity:0.75;cursor:not-allowed">
+              <option value="rail" selected>Rail-Optimized (1 xPU = 8×100G → 8 Planes, -planes 8)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Tiers (Fixed)</label>
+            <select id="inTiers" disabled style="opacity:0.75;cursor:not-allowed">
+              <option value="2" selected>2-Tier Leaf-Spine (ToR-Spine)</option>
+            </select>
+          </div>
+        </div>
+      </details>
       <div class="form-row">
-        <div class="field">
-          <label>xPUs (Nodes)</label>
-          <input type="number" id="inNodes" value="8" min="8" max="8" readonly style="opacity:0.75;cursor:not-allowed" />
-        </div>
-        <div class="field">
-          <label>Ports / xPU (Planes)</label>
-          <input type="number" id="inXpusPerNode" value="8" min="8" max="8" readonly style="opacity:0.75;cursor:not-allowed" />
-        </div>
-        <div class="field">
-          <label>Wiring Mode (Fixed)</label>
-          <select id="inMode" disabled style="opacity:0.75;cursor:not-allowed">
-            <option value="rail" selected>Rail-Optimized (1 xPU = 8×100G → 8 Planes, -planes 8)</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Tiers (Fixed)</label>
-          <select id="inTiers" disabled style="opacity:0.75;cursor:not-allowed">
-            <option value="2" selected>2-Tier Leaf-Spine (ToR-Spine)</option>
-          </select>
-        </div>
         <div class="field">
           <label>Traffic Pattern</label>
           <select id="inTraffic" onchange="drawTopo()">
             <option value="all_to_all" selected>All-to-All (모든 xPU 간 8-Plane 분산)</option>
             <option value="incast">Incast (All-to-Last xPU)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Flow Size (트래픽 양)</label>
+          <select id="inFlowSize">
+            <option value="262144" selected>256 KB (단기 버스트)</option>
+            <option value="1048576">1 MB (중기)</option>
+            <option value="4194304">4 MB (장기)</option>
+            <option value="16777216">16 MB (안정화 관찰)</option>
           </select>
         </div>
         <div class="field">
@@ -205,16 +220,19 @@ HTML_PAGE = """<!DOCTYPE html>
           </select>
         </div>
         <div class="field">
+          <label>Link Speed</label>
+          <select id="inLinkSpeed" onchange="onSpeedChange()">
+            <option value="100000" selected>100G (100Gbps)</option>
+            <option value="400000">400G (400Gbps)</option>
+          </select>
+        </div>
+        <div class="field">
           <label>Fail At (us)</label>
           <input type="number" id="inFailAt" value="20" min="0" max="100000" />
         </div>
         <div class="field">
           <label>Recover At (us, 0=perm)</label>
           <input type="number" id="inRecoverAt" value="0" min="0" max="100000" />
-        </div>
-        <div class="field">
-          <label>Max Test Time (us)</label>
-          <input type="number" id="inEndUs" value="10000" min="100" max="100000" style="min-width:95px" />
         </div>
         <div class="field">
           <label>Timeline Frames</label>
@@ -226,10 +244,11 @@ HTML_PAGE = """<!DOCTYPE html>
           </select>
         </div>
         <div class="field">
-          <label>Link Speed</label>
-          <select id="inLinkSpeed" onchange="onSpeedChange()">
-            <option value="100000" selected>100G (100Gbps)</option>
-            <option value="400000">400G (400Gbps)</option>
+          <label>Network / SRv6</label>
+          <select id="inSrv6Mode" onchange="drawTopo(); if(selectedFlowId) renderWireshark();">
+            <option value="off" selected>Standard L2/IP</option>
+            <option value="srh">SRv6 (SRH Explicit SID)</option>
+            <option value="usid">SRv6 (uSID Compressed)</option>
           </select>
         </div>
         <div class="field">
@@ -266,8 +285,8 @@ HTML_PAGE = """<!DOCTYPE html>
       <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px">
         <div class="label">Interactive Topology Diagram (Click any Plane or Link to fail/unfail; shows All-to-All 64-GPU traffic &amp; redistribution)</div>
         <div class="mono" style="display:flex; flex-wrap:wrap; gap:12px; font-size:0.78rem; color:#cbd5e1">
-          <span><span style="color:#38bdf8">━━</span> 정상</span>
-          <span><span style="color:#4ade80">━━</span> 재분배 증가(+Δ%)</span>
+          <span><span style="color:#38bdf8">━━</span> 정상 (≤12.5%)</span>
+          <span><span style="color:#4ade80">━━</span> 재분배 증가 (&gt;13.0%, +Δ%)</span>
           <span><span style="color:#facc15">━━</span> ECN 혼잡</span>
           <span><span style="color:#e879f9">━━▶</span> Trim (스위치→xPU)</span>
           <span><span style="color:#fb923c">◀╌╌</span> NACK (xPU→스위치)</span>
@@ -358,7 +377,14 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
         <div class="grid" style="grid-template-columns: 1.25fr 1fr; gap:10px; margin-bottom:0">
           <div style="background:#0b1220; border:1px solid #1e293b; border-radius:6px; padding:10px; max-height:260px; overflow-y:auto">
-            <div class="label" style="margin-bottom:6px; color:#93c5fd">Packet Details (L2 Rail / IP-ECN / UEC Transport Header)</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap">
+              <div class="label" style="margin-bottom:0; color:#93c5fd">Packet Details (L2 Rail / Network / Transport Header)</div>
+              <select id="wsHeaderView" onchange="if(selectedFlowId) renderWireshark();" style="width:auto; padding:2px 8px; font-size:0.75rem; background:#0f172a; border:1px solid #334155; color:#e2e8f0; border-radius:4px">
+                <option value="uec" selected>Header View: UEC v1.0 UET (PDS/CMS)</option>
+                <option value="rdma">Header View: RoCEv2 / RDMA (BTH + Ext BTH)</option>
+                <option value="uec11">Header View: UEC v1.1 (UFH 12B-MAC + CSIG)</option>
+              </select>
+            </div>
             <div id="wsHeaderTree" class="mono" style="font-size:0.77rem; line-height:1.45; color:#e2e8f0">패킷을 클릭하면 계층별 헤더가 표시됩니다.</div>
           </div>
           <div style="background:#0b1220; border:1px solid #1e293b; border-radius:6px; padding:10px; max-height:260px; overflow-y:auto">
@@ -648,16 +674,52 @@ function drawTopo() {
 
   if (m.mode === 'rail') {
     svg.setAttribute('width', '1220');
-    svg.setAttribute('height', '460');
-    svg.setAttribute('viewBox', '0 0 1220 460');
+    svg.setAttribute('height', '555');
+    svg.setAttribute('viewBox', '0 0 1220 555');
     const trafficMode = (document.getElementById('inTraffic') && document.getElementById('inTraffic').value) || 'all_to_all';
+    const srv6Mode = (document.getElementById('inSrv6Mode') && document.getElementById('inSrv6Mode').value) || 'off';
     const fr = lastFrameData;
     const isAfterFail = fr && fr.phase === 'AFTER FAIL';
+    const isRecovered = fr && fr.phase === 'RECOVERED';
 
-    // Compute per-plane live load % (either from simulation frame or live preview based on selected faults)
+    // Compute per-plane, per-US, and per-LS live fault sets matching htsim_uec plane-scoped matching
     const activeFailedPlanes = new Set();
-    for (let r = 0; r < m.planes; r++) {
-      if ((failNodes.has(`P${r}`) || failNodes.has(`US${r}`)) && (!fr || isAfterFail)) activeFailedPlanes.add(r);
+    const activeFailedSpines = new Set();
+    const activeFailedLeaves = new Set();
+    if (!fr || isAfterFail) {
+      failNodes.forEach(nd => {
+        const mPlane = nd.match(/^P(\\d+)$/);
+        if (mPlane) {
+          activeFailedPlanes.add(parseInt(mPlane[1], 10));
+          return;
+        }
+        const mPUs = nd.match(/^P(\\d+):US(\\d+)$/);
+        if (mPUs) {
+          activeFailedSpines.add(nd);
+          return;
+        }
+        const mPLs = nd.match(/^P(\\d+):LS(\\d+)$/);
+        if (mPLs) {
+          activeFailedLeaves.add(nd);
+          return;
+        }
+        const mUs = nd.match(/^US(\\d+)$/);
+        if (mUs) {
+          const sp = parseInt(mUs[1], 10) % 2;
+          for (let r = 0; r < m.planes; r++) activeFailedSpines.add(`P${r}:US${sp}`);
+          return;
+        }
+        const mLs = nd.match(/^LS(\\d+)$/);
+        if (mLs) {
+          const t = parseInt(mLs[1], 10);
+          for (let r = 0; r < m.planes; r++) activeFailedLeaves.add(`P${r}:LS${t}`);
+        }
+      });
+      for (let r = 0; r < m.planes; r++) {
+        if (activeFailedSpines.has(`P${r}:US0`) && activeFailedSpines.has(`P${r}:US1`)) {
+          activeFailedPlanes.add(r);
+        }
+      }
     }
     if (fr && fr.failed_planes) {
       fr.failed_planes.forEach(r => activeFailedPlanes.add(r));
@@ -706,12 +768,29 @@ function drawTopo() {
     }
     const basePct = 100 / m.planes;
 
-    const railPts = placeRow(m.planes, 95);
     const srvCount = Math.min(m.nodesPerPlane, 16);
-    const srvPts = placeRow(srvCount, 305);
+    const leafPerPlane = Math.max(1, Math.ceil(srvCount / 2)); // 4 Leaves (LS0..LS3) per Plane
+    const spinePerPlane = 2; // 2 Spines (US0, US1) per Plane
+    const planeCenters = placeRow(m.planes, 95);
+    const getSpinePt = (r, sp) => ({ x: planeCenters[r].x + (sp === 0 ? -24 : 24), y: 102 });
+    const getLeafPt = (r, tor) => {
+      const span = 84;
+      const dx = leafPerPlane === 1 ? 0 : (-span / 2 + (tor * span) / (leafPerPlane - 1));
+      return { x: planeCenters[r].x + dx, y: 204 };
+    };
+    const srvPts = placeRow(srvCount, 385);
+
+    // Draw 8 Independent Plane Containers (matching htsim_uec -planes 8)
+    for (let r = 0; r < m.planes; r++) {
+      const cx = planeCenters[r].x;
+      const isPlaneFail = activeFailedPlanes.has(r) || (!isRecovered && failNodes.has(`P${r}`));
+      const boxStroke = isPlaneFail ? '#ef4444' : '#334155';
+      out += `<rect x="${cx - 64}" y="14" width="128" height="222" rx="8" fill="rgba(15,23,42,0.55)" stroke="${boxStroke}" stroke-width="${isPlaneFail ? 2.0 : 1.1}" />`;
+      out += `<g style="cursor:pointer" onclick="toggleNode('P${r}')"><text x="${cx}" y="30" fill="${isPlaneFail ? '#fca5a5' : '#93c5fd'}" text-anchor="middle" font-size="10.5" font-weight="bold" font-family="monospace">Plane P${r}</text></g>`;
+    }
 
     const drawNode = (pt, label, planeIdx, fill, r = 18) => {
-      const isFail = failNodes.has(label) || failNodes.has(`US${planeIdx}`) || activeFailedPlanes.has(planeIdx);
+      const isFail = failNodes.has(label) || (planeIdx >= 0 && (failNodes.has(`US${planeIdx}`) || activeFailedPlanes.has(planeIdx)));
       const f = isFail ? '#dc2626' : fill;
       const stroke = isFail ? '#fecaca' : '#94a3b8';
       out += `<g style="cursor:pointer" onclick="toggleNode('${label}')">
@@ -720,37 +799,17 @@ function drawTopo() {
       </g>`;
     };
 
-    const drawLink = (p1, p2, label, planeIdx, nodeIdx) => {
-      const tor = Math.floor(nodeIdx / 2), sp = planeIdx % 2;
-      const pPrefix = `P${planeIdx}:`;
-      const simKey = `LS${tor}->US${sp}`;
-      const revKey1 = `US${sp}->LS_${tor}`;
-      const revKey2 = `US${sp}->LS${tor}`;
-      const dstKey = `LS${tor}->DST${nodeIdx}`;
-      const isFail = failLinks.has(label) || activeFailedPlanes.has(planeIdx);
-      const h0 = lastLinkHeat[label] || {};
-      const h1 = lastLinkHeat[pPrefix + simKey] || {};
-      const h2 = lastLinkHeat[pPrefix + revKey1] || {};
-      const h3 = lastLinkHeat[pPrefix + revKey2] || {};
-      const h4 = lastLinkHeat[pPrefix + dstKey] || {};
-      const heat = {
-        ecn: (h0.ecn||0) + (h1.ecn||0) + (h2.ecn||0) + (h3.ecn||0) + (h4.ecn||0),
-        trim: (h0.trim||0) + (h1.trim||0) + (h2.trim||0) + (h3.trim||0) + (h4.trim||0),
-        fail: isFail ? ((h0.fail||0) + (h1.fail||0) + (h2.fail||0) + (h3.fail||0) + (h4.fail||0)) : 0,
-      };
+    const pickLinkStyle = (isFail, heat, planeIdx, isFocusRelevant) => {
       const pct = planePct[planeIdx] || 0;
-      const hasAnyFault = activeFailedPlanes.size > 0 || failLinks.size > 0;
+      const hasAnyFault = !isRecovered && (activeFailedPlanes.size > 0 || activeFailedSpines.size > 0 || activeFailedLeaves.size > 0 || failLinks.size > 0);
       const hasRedistribution = hasAnyFault || (fr && (fr.reroute_cnt || 0) > 0);
       const boosted = hasRedistribution && !isFail && pct > basePct + 0.5;
-
-      let stroke = '#38bdf8', width = 1.6, dash = '6,4', cls = 'flow-anim', op = 0.72;
+      let stroke = '#38bdf8', width = 1.5, dash = '6,4', cls = 'flow-anim', op = 0.68;
       if (isFocus) {
-        const isFlowNode = (nodeIdx === focusSrc || nodeIdx === focusDst);
-        const isFlowPlane = focusPlanes.has(planeIdx) || focusTrimPlanes.has(planeIdx) || focusNackPlanes.has(planeIdx) || focusAckPlanes.has(planeIdx) || focusNewPlanes.has(planeIdx);
-        if (!isFlowNode || !isFlowPlane) {
-          stroke = '#334155'; width = 0.8; dash = ''; cls = ''; op = 0.08;
-        } else if (isFail) {
+        if (isFail || (heat.fail || 0) > 0) {
           stroke = '#ef4444'; width = 3.0; dash = '5,4'; cls = ''; op = 0.95;
+        } else if (!isFocusRelevant) {
+          stroke = '#334155'; width = 0.7; dash = ''; cls = ''; op = 0.07;
         } else if (focusTrimPlanes.has(planeIdx)) {
           stroke = '#e879f9'; width = 3.4; dash = '7,3'; cls = 'flow-anim'; op = 0.98;
         } else if (focusNewPlanes.has(planeIdx)) {
@@ -758,9 +817,7 @@ function drawTopo() {
         } else {
           stroke = '#38bdf8'; width = 2.6; dash = '6,4'; cls = 'flow-anim'; op = 0.95;
         }
-      } else if (isFail) {
-        stroke = '#ef4444'; width = 2.8; dash = '5,4'; cls = ''; op = 0.95;
-      } else if ((heat.fail || 0) > 0) {
+      } else if (isFail || (heat.fail || 0) > 0) {
         stroke = '#ef4444'; width = 2.8; dash = '5,4'; cls = ''; op = 0.95;
       } else if ((heat.trim || 0) > 0) {
         stroke = '#e879f9'; width = 3.4; dash = '7,3'; cls = 'flow-anim'; op = 0.98;
@@ -769,50 +826,108 @@ function drawTopo() {
       } else if (boosted) {
         stroke = '#4ade80'; width = Math.min(3.8, 1.9 + (pct - basePct) * 0.25); dash = '8,4'; cls = 'flow-anim'; op = 0.95;
       } else if (fr && pct <= 0) {
-        stroke = '#475569'; width = 1.2; dash = ''; cls = ''; op = 0.35;
-      } else {
-        width = 1.6;
+        stroke = '#475569'; width = 1.1; dash = ''; cls = ''; op = 0.32;
       }
-      out += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" class="${cls}" stroke="${stroke}" stroke-width="${width}" stroke-opacity="${op}" stroke-dasharray="${dash}" style="cursor:pointer" onclick="toggleLink('${label}')"><title>${label} (Plane ${planeIdx} load=${pct.toFixed(1)}%, ECN=${heat.ecn||0}, TRIM=${heat.trim||0}, FAIL=${heat.fail||0})</title></line>`;
-      if (isFocus && (nodeIdx === focusSrc || nodeIdx === focusDst) && (focusPlanes.has(planeIdx) || focusNewPlanes.has(planeIdx)) && !isFail) {
-        const sx = nodeIdx === focusSrc ? p1.x : p2.x, sy = nodeIdx === focusSrc ? p1.y : p2.y;
-        const ex = nodeIdx === focusSrc ? p2.x : p1.x, ey = nodeIdx === focusSrc ? p2.y : p1.y;
-        const t = nodeIdx === focusSrc ? 0.35 : 0.65;
-        const ax = sx + (ex - sx) * t, ay = sy + (ey - sy) * t;
-        const mk = focusNewPlanes.has(planeIdx) ? 'arrowReroute' : 'arrowFwd';
-        out += `<path d="M ${sx} ${sy} L ${ax} ${ay}" fill="none" stroke="${stroke}" stroke-width="${width}" marker-end="url(#${mk})" opacity="0.95" />`;
+      return { stroke, width, dash, cls, op, pct };
+    };
+
+    const drawUplink = (r, tor, sp) => {
+      const pPrefix = `P${r}:`;
+      const label = `P${r}:LS${tor}-US${sp}`;
+      const h1 = lastLinkHeat[pPrefix + `LS${tor}->US${sp}`] || {};
+      const h2 = lastLinkHeat[pPrefix + `US${sp}->LS_${tor}`] || {};
+      const h3 = lastLinkHeat[pPrefix + `US${sp}->LS${tor}`] || {};
+      const h0 = lastLinkHeat[label] || {};
+      const lsLbl = `P${r}:LS${tor}`;
+      const spLbl = `P${r}:US${sp}`;
+      const isFail = (!isRecovered && (failLinks.has(label) || failNodes.has(lsLbl) || failNodes.has(spLbl))) || activeFailedLeaves.has(lsLbl) || activeFailedSpines.has(spLbl) || activeFailedPlanes.has(r);
+      const heat = {
+        ecn: (h0.ecn||0)+(h1.ecn||0)+(h2.ecn||0)+(h3.ecn||0),
+        trim: (h0.trim||0)+(h1.trim||0)+(h2.trim||0)+(h3.trim||0),
+        fail: isFail ? ((h0.fail||0)+(h1.fail||0)+(h2.fail||0)+(h3.fail||0)) : 0,
+      };
+      const srcTor = Math.floor(focusSrc / 2), dstTor = Math.floor(focusDst / 2);
+      const isFlowTor = isFocus && (tor === srcTor || tor === dstTor);
+      const isFlowPlane = focusPlanes.has(r) || focusTrimPlanes.has(r) || focusNackPlanes.has(r) || focusAckPlanes.has(r) || focusNewPlanes.has(r);
+      const st = pickLinkStyle(isFail, heat, r, isFlowTor && isFlowPlane && sp === (r % 2));
+      const p1 = getLeafPt(r, tor), p2 = getSpinePt(r, sp);
+      out += `<line x1="${p1.x}" y1="${p1.y - 9}" x2="${p2.x}" y2="${p2.y + 13}" class="${st.cls}" stroke="${st.stroke}" stroke-width="${st.width}" stroke-opacity="${st.op}" stroke-dasharray="${st.dash}" pointer-events="none" />`;
+      out += `<line x1="${p1.x}" y1="${p1.y - 9}" x2="${p2.x}" y2="${p2.y + 13}" stroke="transparent" stroke-width="10" pointer-events="stroke" style="cursor:pointer" onclick="toggleLink('${label}')"><title>${label} (Plane ${r}: LS${tor} ↔ US${sp}, load=${st.pct.toFixed(1)}%, ECN=${heat.ecn}, TRIM=${heat.trim}, FAIL=${heat.fail})</title></line>`;
+      if (isFocus && isFlowTor && (focusPlanes.has(r) || focusNewPlanes.has(r)) && sp === (r % 2) && !isFail) {
+        const up = (tor === srcTor);
+        const sx = up ? p1.x : p2.x, sy = up ? p1.y - 9 : p2.y + 13;
+        const ex = up ? p2.x : p1.x, ey = up ? p2.y + 13 : p1.y - 9;
+        const ax = sx + (ex - sx) * 0.55, ay = sy + (ey - sy) * 0.55;
+        const mk = focusNewPlanes.has(r) ? 'arrowReroute' : 'arrowFwd';
+        out += `<path d="M ${sx} ${sy} L ${ax} ${ay}" fill="none" stroke="${st.stroke}" stroke-width="${st.width}" marker-end="url(#${mk})" opacity="0.95" />`;
       }
     };
 
+    const drawLink = (p1, p2, label, planeIdx, nodeIdx, tor) => {
+      const pPrefix = `P${planeIdx}:`;
+      const h0 = lastLinkHeat[label] || {};
+      const h4 = lastLinkHeat[pPrefix + `LS${tor}->DST${nodeIdx}`] || {};
+      const lsLbl = `P${planeIdx}:LS${tor}`;
+      const isFail = (!isRecovered && (failLinks.has(label) || failNodes.has(lsLbl))) || activeFailedLeaves.has(lsLbl) || activeFailedPlanes.has(planeIdx);
+      const heat = {
+        ecn: (h0.ecn||0) + (h4.ecn||0),
+        trim: (h0.trim||0) + (h4.trim||0),
+        fail: isFail ? ((h0.fail||0) + (h4.fail||0)) : 0,
+      };
+      const isFlowNode = (nodeIdx === focusSrc || nodeIdx === focusDst);
+      const isFlowPlane = focusPlanes.has(planeIdx) || focusTrimPlanes.has(planeIdx) || focusNackPlanes.has(planeIdx) || focusAckPlanes.has(planeIdx) || focusNewPlanes.has(planeIdx);
+      const st = pickLinkStyle(isFail, heat, planeIdx, isFlowNode && isFlowPlane);
+      out += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y + 9}" class="${st.cls}" stroke="${st.stroke}" stroke-width="${st.width}" stroke-opacity="${st.op}" stroke-dasharray="${st.dash}" pointer-events="none" />`;
+      out += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y + 9}" stroke="transparent" stroke-width="10" pointer-events="stroke" style="cursor:pointer" onclick="toggleLink('${label}')"><title>${label} Access (xPU ${nodeIdx} ↔ Plane ${planeIdx}:LS${tor}, ECN=${heat.ecn}, TRIM=${heat.trim}, FAIL=${heat.fail})</title></line>`;
+      if (isFocus && isFlowNode && (focusPlanes.has(planeIdx) || focusNewPlanes.has(planeIdx)) && !isFail) {
+        const sx = nodeIdx === focusSrc ? p1.x : p2.x, sy = nodeIdx === focusSrc ? p1.y : p2.y + 9;
+        const ex = nodeIdx === focusSrc ? p2.x : p1.x, ey = nodeIdx === focusSrc ? p2.y + 9 : p1.y;
+        const t = nodeIdx === focusSrc ? 0.45 : 0.60;
+        const ax = sx + (ex - sx) * t, ay = sy + (ey - sy) * t;
+        const mk = focusNewPlanes.has(planeIdx) ? 'arrowReroute' : 'arrowFwd';
+        out += `<path d="M ${sx} ${sy} L ${ax} ${ay}" fill="none" stroke="${st.stroke}" stroke-width="${st.width}" marker-end="url(#${mk})" opacity="0.95" />`;
+      }
+    };
+
+    // Draw 8 Planes × (4 Leaves × 2 Spines Full-Mesh = 64 Links)
+    for (let r = 0; r < m.planes; r++) {
+      for (let t = 0; t < leafPerPlane; t++) {
+        for (let sp = 0; sp < spinePerPlane; sp++) {
+          drawUplink(r, t, sp);
+        }
+      }
+    }
+
     // Draw All-to-All inter-node mesh arcs at bottom (or ONLY the selected Flow arc when in Focus mode)
     if (isFocus && focusSrc >= 0 && focusDst >= 0 && focusSrc < srvCount && focusDst < srvCount) {
-      const x1 = srvPts[focusSrc].x, x2 = srvPts[focusDst].x, y0 = 352;
-      const depth = 28 + Math.abs(focusDst - focusSrc) * 7;
-      const labelY = Math.min(426, y0 + depth * 0.55 + 14);
+      const x1 = srvPts[focusSrc].x, x2 = srvPts[focusDst].x, y0 = 428;
+      const depth = 24 + Math.abs(focusDst - focusSrc) * 6;
+      const labelY = Math.min(506, y0 + depth * 0.55 + 14);
       out += `<path d="M ${x1} ${y0} Q ${(x1 + x2) / 2} ${y0 + depth} ${x2} ${y0}" fill="none" stroke="#38bdf8" stroke-opacity="0.9" stroke-width="2.6" stroke-dasharray="6,4" class="flow-anim" marker-end="url(#arrowFwd)" />`;
-      out += `<text x="${(x1 + x2) / 2}" y="${labelY}" fill="#93c5fd" text-anchor="middle" font-size="10.5" font-weight="bold" font-family="monospace">Flow ${selectedFlowId}: 출발 xPU ${focusSrc} → 목적지 xPU ${focusDst}</text>`;
+      out += `<text x="${(x1 + x2) / 2}" y="${labelY}" fill="#93c5fd" text-anchor="middle" font-size="10.5" font-weight="bold" font-family="monospace">Flow ${selectedFlowId}: 출발 xPU ${focusSrc} → LS${Math.floor(focusSrc/2)} → US → LS${Math.floor(focusDst/2)} → 목적지 xPU ${focusDst}</text>`;
     } else if (trafficMode === 'all_to_all') {
       for (let a = 0; a < srvCount; a++) {
         for (let b = a + 1; b < srvCount; b++) {
-          const x1 = srvPts[a].x, x2 = srvPts[b].x, y0 = 352;
-          const depth = 18 + (b - a) * 9;
-          out += `<path d="M ${x1} ${y0} Q ${(x1 + x2) / 2} ${y0 + depth} ${x2} ${y0}" fill="none" stroke="#38bdf8" stroke-opacity="0.24" stroke-width="1.3" stroke-dasharray="5,4" class="flow-anim" />`;
+          const x1 = srvPts[a].x, x2 = srvPts[b].x, y0 = 428;
+          const depth = 16 + (b - a) * 8;
+          out += `<path d="M ${x1} ${y0} Q ${(x1 + x2) / 2} ${y0 + depth} ${x2} ${y0}" fill="none" stroke="#38bdf8" stroke-opacity="0.22" stroke-width="1.3" stroke-dasharray="5,4" class="flow-anim" />`;
         }
       }
     } else {
       const dstPt = srvPts[srvCount - 1];
       for (let a = 0; a < srvCount - 1; a++) {
-        const x1 = srvPts[a].x, x2 = dstPt.x, y0 = 352;
-        const depth = 20 + (srvCount - 1 - a) * 8;
+        const x1 = srvPts[a].x, x2 = dstPt.x, y0 = 428;
+        const depth = 18 + (srvCount - 1 - a) * 7;
         out += `<path d="M ${x1} ${y0} Q ${(x1 + x2) / 2} ${y0 + depth} ${x2} ${y0}" fill="none" stroke="#f59e0b" stroke-opacity="0.35" stroke-width="1.5" stroke-dasharray="5,4" class="flow-anim" />`;
       }
     }
 
-    // Draw 64 xPU-Port-to-Plane links (dim non-selected xPUs when in Focus mode)
+    // Draw 64 xPU-Port-to-Leaf links (xPU s Port P[r] -> Plane r : LS[floor(s/2)])
     const linkSpdG = Math.round(parseInt(document.getElementById('inLinkSpeed')?.value || '100000', 10) / 1000);
     const xpuAggG = linkSpdG * m.planes;
     const xpuAggLabel = xpuAggG >= 1000 ? `${(xpuAggG/1000).toFixed(1)}T` : `${xpuAggG}G`;
     for (let s = 0; s < srvCount; s++) {
+      const tor = Math.floor(s / 2);
       const boxW = Math.max(96, m.planes * 12 + 12);
       const x0 = srvPts[s].x - boxW / 2;
       const isSrcOrDst = !isFocus || s === focusSrc || s === focusDst;
@@ -820,21 +935,41 @@ function drawTopo() {
       const boxSw = (isFocus && isSrcOrDst) ? 2.4 : 1.3;
       const boxOp = isSrcOrDst ? 1.0 : 0.22;
       const roleTag = (isFocus && s === focusSrc) ? ' [출발 SRC]' : ((isFocus && s === focusDst) ? ' [목적 DST]' : '');
-      out += `<rect x="${x0}" y="275" width="${boxW}" height="74" rx="8" fill="#1e293b" stroke="${boxStroke}" stroke-width="${boxSw}" opacity="${boxOp}"/>`;
+      out += `<rect x="${x0}" y="350" width="${boxW}" height="74" rx="8" fill="#1e293b" stroke="${boxStroke}" stroke-width="${boxSw}" opacity="${boxOp}"/>`;
       if (isFocus && (s === focusSrc || s === focusDst)) {
         const pillBg = s === focusSrc ? '#1d4ed8' : '#15803d';
         const pillTxt = s === focusSrc ? '출발 (SRC)' : '목적지 (DST)';
-        out += `<rect x="${srvPts[s].x - 36}" y="261" width="72" height="15" rx="4" fill="${pillBg}" /><text x="${srvPts[s].x}" y="272" fill="#fff" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">${pillTxt}</text>`;
+        out += `<rect x="${srvPts[s].x - 36}" y="336" width="72" height="15" rx="4" fill="${pillBg}" /><text x="${srvPts[s].x}" y="347" fill="#fff" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">${pillTxt}</text>`;
       }
-      out += `<text x="${srvPts[s].x}" y="341" fill="#e2e8f0" opacity="${boxOp}" text-anchor="middle" font-size="10.5" font-weight="bold" font-family="monospace">xPU ${s}${roleTag || ' (' + xpuAggLabel + ')'}</text>`;
+      out += `<text x="${srvPts[s].x}" y="416" fill="#e2e8f0" opacity="${boxOp}" text-anchor="middle" font-size="10.5" font-weight="bold" font-family="monospace">xPU ${s}${roleTag || ' (' + xpuAggLabel + ')'}</text>`;
       for (let r = 0; r < m.planes; r++) {
         const xpuX = x0 + 11 + r * ((boxW - 22) / Math.max(1, m.planes - 1));
-        const xpuPt = { x: m.planes === 1 ? srvPts[s].x : xpuX, y: 296 };
+        const xpuPt = { x: m.planes === 1 ? srvPts[s].x : xpuX, y: 371 };
         const linkLabel = `N${s}-P${r}`;
-        drawLink(xpuPt, railPts[r], linkLabel, r, s);
-        const linkDown = failLinks.has(linkLabel) || activeFailedPlanes.has(r);
+        drawLink(xpuPt, getLeafPt(r, tor), linkLabel, r, s, tor);
+        const lsLbl = `P${r}:LS${tor}`;
+        const linkDown = (!isRecovered && (failLinks.has(linkLabel) || failNodes.has(lsLbl))) || activeFailedLeaves.has(lsLbl) || activeFailedPlanes.has(r);
         out += `<circle cx="${xpuPt.x}" cy="${xpuPt.y}" r="4.5" fill="${linkDown ? '#ef4444' : '#38bdf8'}" opacity="${boxOp}" />`;
-        out += `<text x="${xpuPt.x}" y="314" fill="#94a3b8" opacity="${boxOp}" text-anchor="middle" font-size="7.5" font-family="monospace">P${r}</text>`;
+        out += `<text x="${xpuPt.x}" y="389" fill="#94a3b8" opacity="${boxOp}" text-anchor="middle" font-size="7.5" font-family="monospace">P${r}</text>`;
+      }
+    }
+
+    // Draw 32 Leaf Switches (4 LS0..LS3 per Plane)
+    for (let r = 0; r < m.planes; r++) {
+      for (let t = 0; t < leafPerPlane; t++) {
+        const lp = getLeafPt(r, t);
+        const lLbl = `P${r}:LS${t}`;
+        const isFail = (!isRecovered && failNodes.has(lLbl)) || activeFailedLeaves.has(lLbl) || activeFailedPlanes.has(r);
+        const isActiveLeaf = !isFocus || ((t === Math.floor(focusSrc / 2) || t === Math.floor(focusDst / 2)) && (focusPlanes.has(r) || focusTrimPlanes.has(r) || focusNackPlanes.has(r) || focusAckPlanes.has(r) || focusNewPlanes.has(r)));
+        const op = isActiveLeaf ? 1.0 : 0.30;
+        out += `<g style="cursor:pointer" opacity="${op}" onclick="toggleNode('${lLbl}')">
+          <rect x="${lp.x - 13}" y="${lp.y - 9}" width="26" height="18" rx="4" fill="${isFail ? '#dc2626' : '#1e3a8a'}" stroke="${isFail ? '#fecaca' : '#60a5fa'}" stroke-width="${isFail ? 2.0 : 1.1}" />
+          <text x="${lp.x}" y="${lp.y + 3}" fill="#f8fafc" text-anchor="middle" font-size="8" font-weight="bold" font-family="monospace">LS${t}</text>
+        </g>`;
+      }
+      if (srv6Mode !== 'off') {
+        const sidTxt = srv6Mode === 'usid' ? `fc00:000${r}::` : `fc00:0:${r}::e`;
+        out += `<text x="${planeCenters[r].x}" y="228" fill="#fde047" text-anchor="middle" font-size="7.8" font-family="monospace">${sidTxt}</text>`;
       }
     }
 
@@ -842,14 +977,14 @@ function drawTopo() {
       const boxW = Math.max(96, m.planes * 12 + 12);
       const x0 = srvPts[s].x - boxW / 2;
       const xpuX = m.planes === 1 ? srvPts[s].x : (x0 + 11 + r * ((boxW - 22) / Math.max(1, m.planes - 1)));
-      return { x: xpuX, y: 296 };
+      return { x: xpuX, y: 371 };
     };
 
-    // Draw Trim (Switch Plane -> Dst xPU) & NACK (Dst xPU -> Switch Plane -> Src xPU) with non-overlapping badges
+    // Draw Trim (Src -> Leaf -> Spine -> Leaf -> Dst) & NACK / ACK reverse 4-hop arrows with non-overlapping badges
     const placedBadges = [];
     const placeBadge = (bx, by, w, h) => {
       let y = by;
-      for (let attempt = 0; attempt < 5; attempt++) {
+      for (let attempt = 0; attempt < 6; attempt++) {
         const clash = placedBadges.some(b => Math.abs(b.x - bx) < (b.w + w) * 0.5 && Math.abs(b.y - y) < (b.h + h) * 0.5 + 2);
         if (!clash) break;
         y += (attempt % 2 === 0 ? 16 : -16);
@@ -858,26 +993,33 @@ function drawTopo() {
       return y;
     };
 
+    const drawSegArrow = (a, b, color, width, dash, marker, tip, frac = 0.55) => {
+      const mx = a.x + (b.x - a.x) * frac, my = a.y + (b.y - a.y) * frac;
+      out += `<path d="M ${a.x} ${a.y} L ${mx} ${my}" fill="none" stroke="${color}" stroke-width="${width}" stroke-dasharray="${dash}" class="flow-anim" marker-end="url(#${marker})" opacity="0.95"><title>${tip}</title></path>`;
+      out += `<line x1="${mx}" y1="${my}" x2="${b.x}" y2="${b.y}" stroke="${color}" stroke-width="${width}" stroke-dasharray="${dash}" class="flow-anim" opacity="0.95"><title>${tip}</title></line>`;
+    };
+
     if (fr && fr.trim_flows && fr.trim_flows.length) {
       const tList = selectedFlowId ? fr.trim_flows.filter(x => String(x.flow_id) === String(selectedFlowId)) : fr.trim_flows;
       tList.forEach((tf, idx) => {
         const s = parseInt(tf.src, 10), d = parseInt(tf.dst, 10), r = parseInt(tf.plane, 10);
         if (isNaN(d) || isNaN(r) || d >= srvCount || r >= m.planes) return;
-        const pPlane = railPts[r], pDst = getPortPt(d, r);
-        const mid = { x: pPlane.x + (pDst.x - pPlane.x) * 0.30, y: pPlane.y + (pDst.y - pPlane.y) * 0.30 };
-        const tip = `TRIM (Flow ${tf.flow_id}): 출발지 xPU ${s} → 스위치 Plane ${r}에서 Trim 발생 → 목적지 xPU ${d}로 진입 (${tf.cnt}건)`;
+        const sp = r % 2, pSpine = getSpinePt(r, sp), pDst = getPortPt(d, r);
+        const pDstLeaf = getLeafPt(r, Math.floor(d / 2));
+        const tip = `TRIM (Flow ${tf.flow_id}): xPU ${s} → P${r}:LS${Math.floor((isNaN(s)?0:s)/2)} → P${r}:US${sp} → P${r}:LS${Math.floor(d/2)} → xPU ${d} (${tf.cnt}건)`;
         if (!isNaN(s) && s >= 0 && s < srvCount) {
           const pSrc = getPortPt(s, r);
-          const midIn = { x: pSrc.x + (pPlane.x - pSrc.x) * 0.42, y: pSrc.y + (pPlane.y - pSrc.y) * 0.42 };
-          out += `<path d="M ${pSrc.x} ${pSrc.y} L ${midIn.x} ${midIn.y}" fill="none" stroke="#e879f9" stroke-width="2.8" stroke-dasharray="6,3" class="flow-anim" marker-end="url(#arrowTrim)" opacity="0.92"><title>${tip}</title></path>`;
-          out += `<line x1="${midIn.x}" y1="${midIn.y}" x2="${pPlane.x}" y2="${pPlane.y}" stroke="#e879f9" stroke-width="2.8" stroke-dasharray="6,3" class="flow-anim" opacity="0.92"><title>${tip}</title></line>`;
+          const pSrcLeaf = getLeafPt(r, Math.floor(s / 2));
+          drawSegArrow(pSrc, { x: pSrcLeaf.x, y: pSrcLeaf.y + 9 }, '#e879f9', 2.6, '6,3', 'arrowTrim', tip, 0.55);
+          drawSegArrow({ x: pSrcLeaf.x, y: pSrcLeaf.y - 9 }, { x: pSpine.x, y: pSpine.y + 13 }, '#e879f9', 2.8, '6,3', 'arrowTrim', tip, 0.55);
         }
-        out += `<path d="M ${pPlane.x} ${pPlane.y} L ${mid.x} ${mid.y}" fill="none" stroke="#e879f9" stroke-width="3.0" marker-end="url(#arrowTrim)" opacity="0.95"><title>${tip}</title></path>`;
-        out += `<path d="M ${mid.x} ${mid.y} L ${pDst.x} ${pDst.y - 6}" fill="none" stroke="#e879f9" stroke-width="3.0" marker-end="url(#arrowTrim)" opacity="0.95"><title>${tip}</title></path>`;
+        drawSegArrow({ x: pSpine.x, y: pSpine.y + 13 }, { x: pDstLeaf.x, y: pDstLeaf.y - 9 }, '#e879f9', 3.0, '', 'arrowTrim', tip, 0.55);
+        drawSegArrow({ x: pDstLeaf.x, y: pDstLeaf.y + 9 }, { x: pDst.x, y: pDst.y - 5 }, '#e879f9', 3.0, '', 'arrowTrim', tip, 0.60);
         if (idx < 3 || selectedFlowId) {
+          const mx = (pDstLeaf.x + pDst.x) * 0.5, my = (pDstLeaf.y + pDst.y) * 0.5;
           const lbl = (!isNaN(s) && s >= 0) ? `TRIM x${s}→P${r}→x${d}` : `TRIM P${r}→x${d}`;
-          const by = placeBadge(mid.x, mid.y - 9, 96, 14);
-          out += `<rect x="${mid.x - 48}" y="${by - 7}" width="96" height="14" rx="4" fill="#3b0764" stroke="#e879f9" stroke-width="0.9"/><text x="${mid.x}" y="${by + 3}" fill="#f5d0fe" text-anchor="middle" font-size="8.2" font-weight="bold" font-family="monospace">${lbl}</text>`;
+          const by = placeBadge(mx, my - 8, 96, 14);
+          out += `<rect x="${mx - 48}" y="${by - 7}" width="96" height="14" rx="4" fill="#3b0764" stroke="#e879f9" stroke-width="0.9"/><text x="${mx}" y="${by + 3}" fill="#f5d0fe" text-anchor="middle" font-size="8.2" font-weight="bold" font-family="monospace">${lbl}</text>`;
         }
       });
     }
@@ -886,21 +1028,21 @@ function drawTopo() {
       nList.forEach((nf, idx) => {
         const s = parseInt(nf.src, 10), d = parseInt(nf.dst, 10), r = parseInt(nf.plane, 10);
         if (isNaN(s) || isNaN(r) || s >= srvCount || r >= m.planes) return;
-        const pFrom = getPortPt(s, r), pPlane = railPts[r];
-        const off = 5;
-        const midUp = { x: pFrom.x + (pPlane.x - pFrom.x) * 0.32 + off, y: pFrom.y + (pPlane.y - pFrom.y) * 0.32 };
-        const tip = `NACK 역방향 (Flow ${nf.flow_id}): 목적지 xPU ${s} → Plane ${r} → 출발지 xPU ${nf.dst} (${nf.cnt}건)`;
-        out += `<path d="M ${pFrom.x + off} ${pFrom.y} L ${midUp.x} ${midUp.y}" fill="none" stroke="#fb923c" stroke-width="2.8" stroke-dasharray="5,3" class="flow-anim" marker-end="url(#arrowNack)" opacity="0.98"><title>${tip}</title></path>`;
-        out += `<line x1="${midUp.x}" y1="${midUp.y}" x2="${pPlane.x + off}" y2="${pPlane.y}" stroke="#fb923c" stroke-width="2.8" stroke-dasharray="5,3" class="flow-anim" opacity="0.98"><title>${tip}</title></line>`;
+        const off = 5, sp = r % 2;
+        const pFrom = getPortPt(s, r), pSpine = getSpinePt(r, sp);
+        const pFromLeaf = getLeafPt(r, Math.floor(s / 2));
+        const tip = `NACK 역방향 (Flow ${nf.flow_id}): xPU ${s} → P${r}:LS${Math.floor(s/2)} → P${r}:US${sp} → P${r}:LS${Math.floor((isNaN(d)?0:d)/2)} → xPU ${nf.dst} (${nf.cnt}건)`;
+        drawSegArrow({ x: pFrom.x + off, y: pFrom.y }, { x: pFromLeaf.x + off, y: pFromLeaf.y + 9 }, '#fb923c', 2.6, '5,3', 'arrowNack', tip, 0.55);
+        drawSegArrow({ x: pFromLeaf.x + off, y: pFromLeaf.y - 9 }, { x: pSpine.x + off, y: pSpine.y + 13 }, '#fb923c', 2.6, '5,3', 'arrowNack', tip, 0.55);
         if (!isNaN(d) && d < srvCount) {
-          const pOrigSrc = getPortPt(d, r);
-          const midDn = { x: pPlane.x + (pOrigSrc.x - pPlane.x) * 0.65 + off, y: pPlane.y + (pOrigSrc.y - pPlane.y) * 0.65 };
-          out += `<path d="M ${pPlane.x + off} ${pPlane.y} L ${midDn.x} ${midDn.y}" fill="none" stroke="#fb923c" stroke-width="2.8" stroke-dasharray="5,3" class="flow-anim" marker-end="url(#arrowNack)" opacity="0.98"><title>${tip}</title></path>`;
-          out += `<path d="M ${midDn.x} ${midDn.y} L ${pOrigSrc.x + off} ${pOrigSrc.y - 6}" fill="none" stroke="#fb923c" stroke-width="2.8" stroke-dasharray="5,3" class="flow-anim" marker-end="url(#arrowNack)" opacity="0.98"><title>${tip}</title></path>`;
+          const pOrigSrc = getPortPt(d, r), pDstLeaf = getLeafPt(r, Math.floor(d / 2));
+          drawSegArrow({ x: pSpine.x + off, y: pSpine.y + 13 }, { x: pDstLeaf.x + off, y: pDstLeaf.y - 9 }, '#fb923c', 2.6, '5,3', 'arrowNack', tip, 0.55);
+          drawSegArrow({ x: pDstLeaf.x + off, y: pDstLeaf.y + 9 }, { x: pOrigSrc.x + off, y: pOrigSrc.y - 5 }, '#fb923c', 2.6, '5,3', 'arrowNack', tip, 0.60);
         }
         if (idx < 3 || selectedFlowId) {
-          const by = placeBadge(midUp.x, midUp.y + 10, 76, 14);
-          out += `<rect x="${midUp.x - 38}" y="${by - 7}" width="76" height="14" rx="4" fill="#431407" stroke="#fb923c" stroke-width="0.9"/><text x="${midUp.x}" y="${by + 3}" fill="#fed7aa" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">NACK x${s}→x${nf.dst}</text>`;
+          const mx = (pFrom.x + pFromLeaf.x) * 0.5, my = (pFrom.y + pFromLeaf.y) * 0.5;
+          const by = placeBadge(mx, my + 10, 76, 14);
+          out += `<rect x="${mx - 38}" y="${by - 7}" width="76" height="14" rx="4" fill="#431407" stroke="#fb923c" stroke-width="0.9"/><text x="${mx}" y="${by + 3}" fill="#fed7aa" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">NACK x${s}→x${nf.dst}</text>`;
         }
       });
     }
@@ -908,50 +1050,71 @@ function drawTopo() {
       focusAcks.forEach((af) => {
         const s = parseInt(af.src, 10), d = parseInt(af.dst, 10), r = parseInt(af.plane, 10);
         if (isNaN(s) || isNaN(r) || s >= srvCount || r >= m.planes) return;
-        const pFrom = getPortPt(s, r), pPlane = railPts[r];
-        const off = -5;
-        const midUp = { x: pFrom.x + (pPlane.x - pFrom.x) * 0.32 + off, y: pFrom.y + (pPlane.y - pFrom.y) * 0.32 };
-        const tip = `ACK 역방향 (Flow ${af.flow_id}): 목적지 xPU ${s} → Plane ${r} → 출발지 xPU ${af.dst} (${af.cnt}건)`;
-        out += `<path d="M ${pFrom.x + off} ${pFrom.y} L ${midUp.x} ${midUp.y}" fill="none" stroke="#2dd4bf" stroke-width="2.2" stroke-dasharray="4,3" class="flow-anim" marker-end="url(#arrowAck)" opacity="0.92"><title>${tip}</title></path>`;
-        out += `<line x1="${midUp.x}" y1="${midUp.y}" x2="${pPlane.x + off}" y2="${pPlane.y}" stroke="#2dd4bf" stroke-width="2.2" stroke-dasharray="4,3" class="flow-anim" opacity="0.92"><title>${tip}</title></line>`;
+        const off = -5, sp = r % 2;
+        const pFrom = getPortPt(s, r), pSpine = getSpinePt(r, sp);
+        const pFromLeaf = getLeafPt(r, Math.floor(s / 2));
+        const tip = `ACK 역방향 (Flow ${af.flow_id}): xPU ${s} → P${r}:LS${Math.floor(s/2)} → P${r}:US${sp} → P${r}:LS${Math.floor((isNaN(d)?0:d)/2)} → xPU ${af.dst} (${af.cnt}건)`;
+        drawSegArrow({ x: pFrom.x + off, y: pFrom.y }, { x: pFromLeaf.x + off, y: pFromLeaf.y + 9 }, '#2dd4bf', 2.2, '4,3', 'arrowAck', tip, 0.55);
+        drawSegArrow({ x: pFromLeaf.x + off, y: pFromLeaf.y - 9 }, { x: pSpine.x + off, y: pSpine.y + 13 }, '#2dd4bf', 2.2, '4,3', 'arrowAck', tip, 0.55);
         if (!isNaN(d) && d < srvCount) {
-          const pOrigSrc = getPortPt(d, r);
-          const midDn = { x: pPlane.x + (pOrigSrc.x - pPlane.x) * 0.65 + off, y: pPlane.y + (pOrigSrc.y - pPlane.y) * 0.65 };
-          out += `<path d="M ${pPlane.x + off} ${pPlane.y} L ${midDn.x} ${midDn.y}" fill="none" stroke="#2dd4bf" stroke-width="2.2" stroke-dasharray="4,3" class="flow-anim" marker-end="url(#arrowAck)" opacity="0.92"><title>${tip}</title></path>`;
-          out += `<path d="M ${midDn.x} ${midDn.y} L ${pOrigSrc.x + off} ${pOrigSrc.y - 6}" fill="none" stroke="#2dd4bf" stroke-width="2.2" stroke-dasharray="4,3" class="flow-anim" marker-end="url(#arrowAck)" opacity="0.92"><title>${tip}</title></path>`;
+          const pOrigSrc = getPortPt(d, r), pDstLeaf = getLeafPt(r, Math.floor(d / 2));
+          drawSegArrow({ x: pSpine.x + off, y: pSpine.y + 13 }, { x: pDstLeaf.x + off, y: pDstLeaf.y - 9 }, '#2dd4bf', 2.2, '4,3', 'arrowAck', tip, 0.55);
+          drawSegArrow({ x: pDstLeaf.x + off, y: pDstLeaf.y + 9 }, { x: pOrigSrc.x + off, y: pOrigSrc.y - 5 }, '#2dd4bf', 2.2, '4,3', 'arrowAck', tip, 0.60);
         }
-        const by = placeBadge(midUp.x, midUp.y + 10, 96, 14);
-        out += `<rect x="${midUp.x - 48}" y="${by - 7}" width="96" height="14" rx="4" fill="#042f2e" stroke="#2dd4bf" stroke-width="0.9"/><text x="${midUp.x}" y="${by + 3}" fill="#99f6e4" text-anchor="middle" font-size="8.2" font-weight="bold" font-family="monospace">ACK x${s}→P${r}→x${af.dst}(${af.cnt})</text>`;
+        const mx = (pFrom.x + pFromLeaf.x) * 0.5, my = (pFrom.y + pFromLeaf.y) * 0.5;
+        const by = placeBadge(mx, my + 10, 96, 14);
+        out += `<rect x="${mx - 48}" y="${by - 7}" width="96" height="14" rx="4" fill="#042f2e" stroke="#2dd4bf" stroke-width="0.9"/><text x="${mx}" y="${by + 3}" fill="#99f6e4" text-anchor="middle" font-size="8.2" font-weight="bold" font-family="monospace">ACK x${s}→P${r}→x${af.dst}(${af.cnt})</text>`;
       });
     }
 
-    // Draw 8 Planes with live Traffic Share % bars
-    const hasAnyFault = activeFailedPlanes.size > 0 || failLinks.size > 0;
-    railPts.forEach((p, r) => {
+    // Draw 8 Planes' Spine Switches (US0, US1 per Plane) + live Traffic Share % bars & optional SRv6 SIDs
+    const hasAnyFault = !isRecovered && (activeFailedPlanes.size > 0 || activeFailedSpines.size > 0 || activeFailedLeaves.size > 0 || failLinks.size > 0);
+    const hasRedistribution = hasAnyFault || (fr && (fr.reroute_cnt || 0) > 0);
+    for (let r = 0; r < m.planes; r++) {
+      const cx = planeCenters[r].x;
       const pct = planePct[r] || 0;
-      const isFail = activeFailedPlanes.has(r) || failNodes.has(`P${r}`) || failNodes.has(`US${r}`);
+      const isFail = activeFailedPlanes.has(r) || (!isRecovered && failNodes.has(`P${r}`));
       const delta = pct - basePct;
-      const barW = 76;
+      const barW = 86;
+      const isBoosted = !isFail && hasRedistribution && delta > 0.5;
+      const barColor = isFail ? '#ef4444' : (fr && pct <= 0 ? '#475569' : (isBoosted ? '#4ade80' : '#38bdf8'));
       const fillW = Math.max(0, Math.min(barW, (pct / 35) * barW));
-      const barColor = isFail ? '#ef4444' : (hasAnyFault && delta > 0.5 ? '#22d3ee' : '#22c55e');
-      out += `<rect x="${p.x - barW/2}" y="${p.y - 54}" width="${barW}" height="10" rx="4" fill="#0f172a" stroke="#334155" />`;
-      out += `<rect x="${p.x - barW/2}" y="${p.y - 54}" width="${fillW}" height="10" rx="4" fill="${barColor}" />`;
-      const pctLabel = isFail ? 'FAIL 0%' : (hasAnyFault && delta > 0.5 ? `${pct.toFixed(1)}% (+${delta.toFixed(1)}%)` : `${pct.toFixed(1)}%`);
-      out += `<text x="${p.x}" y="${p.y - 60}" fill="${isFail ? '#fca5a5' : '#cbd5e1'}" text-anchor="middle" font-size="10" font-weight="bold" font-family="monospace">${pctLabel}</text>`;
-      drawNode(p, `P${r}`, r, '#0f766e', 20);
-      out += `<text x="${p.x}" y="${p.y - 28}" fill="#94a3b8" text-anchor="middle" font-size="10" font-family="monospace">Plane ${r}</text>`;
-    });
+      const rawCnt = (fr && fr.plane_counts && fr.plane_counts[r] != null) ? fr.plane_counts[r] : null;
+      const pCnt = rawCnt !== null ? ` (${Number.isInteger(rawCnt) ? rawCnt : rawCnt.toFixed(1)} pkts)` : '';
+      out += `<rect x="${cx - barW/2}" y="48" width="${barW}" height="8" rx="4" fill="#0f172a" stroke="#334155" />`;
+      out += `<rect x="${cx - barW/2}" y="48" width="${fillW}" height="8" rx="4" fill="${barColor}" ><title>Plane P${r}: ${pct.toFixed(1)}%${pCnt}</title></rect>`;
+      const pctLabel = isFail ? 'FAIL 0%' : (isBoosted ? `${pct.toFixed(1)}% (+${delta.toFixed(1)}%)` : `${pct.toFixed(1)}%`);
+      out += `<text x="${cx}" y="44" fill="${isFail ? '#fca5a5' : (isBoosted ? '#86efac' : '#cbd5e1')}" text-anchor="middle" font-size="9" font-weight="bold" font-family="monospace">${pctLabel}</text>`;
+      for (let sp = 0; sp < spinePerPlane; sp++) {
+        const spPt = getSpinePt(r, sp);
+        const spLbl = `P${r}:US${sp}`;
+        const isSpFail = (!isRecovered && failNodes.has(spLbl)) || activeFailedSpines.has(spLbl) || isFail;
+        const f = isSpFail ? '#dc2626' : '#0f766e';
+        const stroke = isSpFail ? '#fecaca' : '#94a3b8';
+        out += `<g style="cursor:pointer" onclick="toggleNode('${spLbl}')">
+          <circle cx="${spPt.x}" cy="${spPt.y}" r="13" fill="${f}" stroke="${stroke}" stroke-width="${isSpFail ? 2.2 : 1.3}" />
+          <text x="${spPt.x}" y="${spPt.y + 3.5}" fill="#f8fafc" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">US${sp}</text>
+        </g>`;
+      }
+      if (srv6Mode !== 'off') {
+        const spSid = srv6Mode === 'usid' ? `fc00:010${r}::` : `fc00:1:${r}::s`;
+        out += `<text x="${cx}" y="76" fill="#fde047" text-anchor="middle" font-size="7.8" font-family="monospace">${spSid}</text>`;
+      }
+    }
 
     const healthyCnt = m.planes - activeFailedPlanes.size;
     const focusAckCnt = focusAcks.reduce((acc, x) => acc + (x.cnt || 0), 0);
+    const srv6Tag = srv6Mode !== 'off' ? ` | SRv6(${srv6Mode.toUpperCase()}): Trim Offset=${srv6Mode==='usid'?'94B':'126B'}` : '';
     const statusBanner = isFocus
-      ? `🔍 Flow ${selectedFlowId} 집중 트래킹 (xPU ${focusSrc} → xPU ${focusDst}) | 현재 구간: TX=${focusFlowFrame ? focusFlowFrame.tx_cnt : 0}, RTX=${focusFlowFrame ? focusFlowFrame.rtx_cnt : 0}, ACK=${focusAckCnt}, Trim=${focusTrims.length}, NACK=${focusNacks.length}, Reroute=${focusReroutes.length}건`
-      : (activeFailedPlanes.size > 0
-        ? `⚠️ ${activeFailedPlanes.size} Plane(s) Failed → Traffic redistributed across ${healthyCnt}/${m.planes} healthy Planes (~${(100/Math.max(1,healthyCnt)).toFixed(1)}% each)`
-        : (failLinks.size > 0
-          ? `⚠️ ${failLinks.size} Link(s) Failed → Traffic rerouted to healthy links/EVs`
-          : `✅ All ${m.planes}/${m.planes} Planes Healthy | ${trafficMode === 'all_to_all' ? 'All-to-All (8 xPUs × 8 Ports = 64 Links)' : 'Incast'} (~${basePct.toFixed(1)}% per Plane)`));
-    out += `<text x="610" y="446" fill="#cbd5e1" text-anchor="middle" font-size="11.5" font-family="monospace">${statusBanner}</text>`;
+      ? `🔍 Flow ${selectedFlowId} 집중 트래킹 (xPU ${focusSrc} → xPU ${focusDst}) | TX=${focusFlowFrame ? focusFlowFrame.tx_cnt : 0}, RTX=${focusFlowFrame ? focusFlowFrame.rtx_cnt : 0}, ACK=${focusAckCnt}, Trim=${focusTrims.length}, NACK=${focusNacks.length}, Reroute=${focusReroutes.length}건${srv6Tag}`
+      : (isRecovered
+        ? `✅ Recovered @ ${fr.t_start_us.toFixed(1)} us → Fault cleared, traffic restored across all ${m.planes} Planes (~${basePct.toFixed(1)}% each)${srv6Tag}`
+        : (activeFailedPlanes.size > 0
+        ? `⚠️ ${activeFailedPlanes.size} Plane(s) Failed → Traffic redistributed across ${healthyCnt}/${m.planes} healthy Planes (~${(100/Math.max(1,healthyCnt)).toFixed(1)}% each)${srv6Tag}`
+        : (( !isRecovered && (failLinks.size > 0 || activeFailedSpines.size > 0 || activeFailedLeaves.size > 0))
+          ? `⚠️ ${activeFailedSpines.size + activeFailedLeaves.size} Switch(es) / ${failLinks.size} Link(s) Failed → Traffic rerouted to healthy Leaf-Spine paths/EVs${srv6Tag}`
+          : `✅ htsim_uec 2-Tier (8 Planes × [4 LS × 2 US Full-Mesh], 2:1 xPU-Leaf) Healthy | ${trafficMode === 'all_to_all' ? 'All-to-All' : 'Incast'} (~${basePct.toFixed(1)}% per Plane)${srv6Tag}`)));
+    out += `<text x="610" y="538" fill="#cbd5e1" text-anchor="middle" font-size="11" font-family="monospace">${statusBanner}</text>`;
     svg.innerHTML = out;
     return;
   }
@@ -993,7 +1156,8 @@ function drawTopo() {
     else if ((heat.fail || 0) > 0) { stroke = '#ef4444'; width = 3; }
     else if ((heat.trim || 0) > 0) { stroke = '#f97316'; width = 2.8; }
     else if ((heat.ecn || 0) > 0) { stroke = '#eab308'; width = 2.4; }
-    out += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="${stroke}" stroke-width="${width}" stroke-dasharray="${dash}" style="cursor:pointer" onclick="toggleLink('${label}')"><title>${label} (ECN=${heat.ecn||0}, TRIM=${heat.trim||0}, FAIL=${heat.fail||0})</title></line>`;
+    out += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="${stroke}" stroke-width="${width}" stroke-dasharray="${dash}" pointer-events="none" />`;
+    out += `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="transparent" stroke-width="10" pointer-events="stroke" style="cursor:pointer" onclick="toggleLink('${label}')"><title>${label} (ECN=${heat.ecn||0}, TRIM=${heat.trim||0}, FAIL=${heat.fail||0})</title></line>`;
   };
 
   // Links: Core <-> Agg
@@ -1169,6 +1333,148 @@ function renderWsHeaderDetails(p) {
   const pktType = p.event.includes('NACK') ? 'UEC_NACK (0x04)' : (p.event.includes('ACK') ? 'UEC_ACK (0x02)' : (isTrim ? 'UEC_TRIMMED_DATA (0x03)' : (p.event === 'TX_PROBE' ? 'UEC_PROBE (0x05)' : 'UEC_DATA (0x01)')));
   const evNum = parseInt(p.ev, 16) || 0;
   const fidNum = parseInt(p.flow_id, 10) || 0;
+  const srv6Mode = (document.getElementById('inSrv6Mode') && document.getElementById('inSrv6Mode').value) || 'off';
+  const srcTor = Math.floor(Number(p.src) / 2);
+  const dstTor = Math.floor(Number(p.dst) / 2);
+  const spIdx = p.plane % 2;
+  const srcSid = srv6Mode === 'usid' ? `fc00:000${p.plane}:e${srcTor}::` : `fc00:0:${p.plane}::e${srcTor}`;
+  const spineSid = srv6Mode === 'usid' ? `fc00:010${p.plane}:s${spIdx}::` : `fc00:1:${p.plane}::s${spIdx}`;
+  const dstSid = srv6Mode === 'usid' ? `fc00:000${p.plane}:d${dstTor}::` : `fc00:0:${p.plane}::d${dstTor}`;
+  const srhHdrBytes = srv6Mode === 'usid' ? 24 : 56;
+  const srv6TrimMin = 14 + 40 + srhHdrBytes + 16;
+
+  const netLayerHtml = (srv6Mode !== 'off')
+    ? `<details open style="margin-bottom:6px">
+        <summary style="cursor:pointer; color:#facc15; font-weight:bold">IPv6 + SRv6 ${srv6Mode === 'usid' ? 'uSID' : 'SRH'} Header (fc00::${p.src} → ${dstSid})</summary>
+        <div style="padding-left:14px; color:#cbd5e1">
+          • Version: 6 | Next Header: 43 (Routing / SRH) | Traffic Class ECN: ${ecnDesc}<br/>
+          • SRH: RoutingType=4 (SRv6), SegmentsLeft=${p.node.startsWith('LS') ? 1 : (p.node.startsWith('DST') ? 0 : 2)}, LastEntry=2<br/>
+          • SID[2] (Ingress Leaf P${p.plane}:LS${srcTor}): <strong>${srcSid}</strong><br/>
+          • SID[1] (Spine P${p.plane}:US${spIdx}): <strong>${spineSid}</strong><br/>
+          • SID[0] (Egress Leaf P${p.plane}:LS${dstTor}→xPU ${p.dst}): <strong>${dstSid}</strong><br/>
+          • SRv6 Trim Offset: <strong>${srv6TrimMin} B</strong> (L2 14B + IPv6 40B + SRH ${srhHdrBytes}B + UEC 16B 보존)
+        </div>
+      </details>`
+    : `<details open style="margin-bottom:6px">
+        <summary style="cursor:pointer; color:#facc15; font-weight:bold">IPv4 / Congestion Header (10.0.0.${p.src} → 10.0.0.${p.dst})</summary>
+        <div style="padding-left:14px; color:#cbd5e1">
+          • Version: 4 | Protocol: UEC (UDP-encap) | Total Length: ${p.len_bytes} B<br/>
+          • DSCP / ECN: ${ecnDesc}
+        </div>
+      </details>`;
+
+  const headerViewEl = document.getElementById('wsHeaderView');
+  const headerView = headerViewEl ? headerViewEl.value : 'uec';
+  const isAck = p.event.includes('ACK') && !p.event.includes('NACK');
+  const isNack = p.event.includes('NACK');
+  const isProbe = p.event.includes('PROBE');
+  const flowPkts = (lastSimData && lastSimData.flow_packets && lastSimData.flow_packets[String(selectedFlowId)]) || [];
+  const matchTx = isAck ? flowPkts.find(x => (x.event === 'TX_DATA' || x.event === 'TX_RTX') && x.psn === p.psn && x.ts_us <= p.ts_us) : null;
+  const measuredRttUs = matchTx ? (p.ts_us - matchTx.ts_us).toFixed(3) : null;
+  const uecRttDetailHtml = isAck
+    ? `• ACK Wire Format: <strong>64B UecAckPacket</strong> (PRIO_HI, type=UECACK)<br/>
+       • acked_psn: <strong>${p.psn}</strong> (송신단 _tx_bitmap 조회 키) | ev_echo: ${p.ev} (P${p.plane})<br/>
+       • ACK Echo Flags: ecn_echo=${p.ecn !== '0' ? '1' : '0'}, rtx_echo=${matchTx && matchTx.event === 'TX_RTX' ? '1' : '0'}, is_probe_ack=${isProbe ? '1' : '0'}<br/>
+       • Path RTT (now - send_time): <strong>${measuredRttUs ? measuredRttUs + ' us (tx @ ' + matchTx.ts_us.toFixed(3) + ' us)' : 'local _tx_bitmap[psn] 조회'}</strong>`
+    : (isProbe
+      ? `• Wire Timestamp: <strong>None</strong> (패킷 헤더 내 time 필드 없음)<br/>
+         • Local Send Record: <strong>_probe_send_time = ${p.ts_us.toFixed(3)} us</strong> (_probe_seqno=${p.psn}) → UecAckPacket(64B, is_probe_ack=1) 복귀 시 RTT 측정`
+      : `• Wire Timestamp: <strong>None</strong> (패킷 헤더 내 time 필드 없음)<br/>
+         • Local Send Record: <strong>_tx_bitmap[${p.psn}].send_time = ${p.ts_us.toFixed(3)} us</strong> → 64B UecAckPacket(acked_psn=${p.psn}) 복귀 시 raw_rtt 산출`);
+
+  const udpSrcPort = 49152 + (evNum & 0x3fff);
+  const destQp = 0x000100 + (fidNum & 0xffff);
+  const bthOpcode = isNack ? 0x11 : (isAck ? 0x11 : 0x0a);
+  const bthOpcodeName = isNack ? '0x11 (RC ACK - NACK/RNR Syndrome)' : (isAck ? '0x11 (RC Acknowledge)' : (isProbe ? '0x0A (RC RDMA_WRITE_ONLY / Probe)' : '0x0A (RC RDMA_WRITE_ONLY)'));
+  const aethSyndrome = isNack ? '0x60 (RNR/NACK)' : (p.ecn !== '0' ? '0x01 (ACK + ECN/CNP)' : '0x00 (ACK)');
+  const dmaLen = Math.max(0, p.len_bytes - 64);
+  const vaLow = (p.psn * 4096) >>> 0;
+  const rKey = (0x00008000 + (fidNum & 0xffff)) >>> 0;
+
+  let layersHtml = '';
+  if (headerView === 'rdma') {
+    layersHtml = `
+    <details open style="margin-bottom:6px">
+      <summary style="cursor:pointer; color:#4ade80; font-weight:bold">Rail-Optimized L2 Fabric Header (xPU ${p.src} → P${p.plane}:LS${srcTor} → P${p.plane}:US${spIdx} → P${p.plane}:LS${dstTor} → xPU ${p.dst})</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        • Src MAC / Port: 02:00:00:00:${String(Number(p.src)).padStart(2,'0')}:${String(p.plane).padStart(2,'0')} (xPU ${p.src}, Port P${p.plane})<br/>
+        • Dst MAC / Port: 02:00:00:00:${String(Number(p.dst)).padStart(2,'0')}:${String(p.plane).padStart(2,'0')} (xPU ${p.dst}, Port P${p.plane})<br/>
+        • Fabric Plane: Plane ${p.plane} (Spine US${spIdx}, EtherType: ${srv6Mode !== 'off' ? '0x86DD IPv6/RoCEv2' : '0x0800 IPv4/RoCEv2'})
+      </div>
+    </details>
+    <details open style="margin-bottom:6px">
+      <summary style="cursor:pointer; color:#facc15; font-weight:bold">IP / UDP Encapsulation (RoCEv2: 10.0.0.${p.src}:${udpSrcPort} → 10.0.0.${p.dst}:4791)</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        • IPv4: Src=10.0.0.${p.src}, Dst=10.0.0.${p.dst}, Proto=17 (UDP), DSCP/ECN=${ecnDesc}<br/>
+        • UDP: SrcPort=<strong>${udpSrcPort}</strong> (EV=${p.ev} 엔트로피 해시), DstPort=<strong>4791</strong> (0x12b7, RoCEv2)
+      </div>
+    </details>
+    <details open style="margin-bottom:6px">
+      <summary style="cursor:pointer; color:#e879f9; font-weight:bold">InfiniBand BTH (Base Transport Header, 12B — OpCode=${bthOpcodeName.split(' ')[0]}, PSN=${p.psn})</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        • OpCode: <strong>${bthOpcodeName}</strong> | SE=0, M=0, PadCnt=0, TVer=0<br/>
+        • P_Key: 0xFFFF | DestQP: <strong>0x${destQp.toString(16).padStart(6,'0')}</strong> (Flow ${p.flow_id})<br/>
+        • AckReq: ${isAck || isNack ? '0' : '1'} | PSN (24-bit): <strong>${p.psn}</strong> (0x${(p.psn & 0xffffff).toString(16).padStart(6,'0')})
+      </div>
+    </details>
+    <details open>
+      <summary style="cursor:pointer; color:#fb923c; font-weight:bold">Extended BTH (${isAck || isNack ? 'AETH 4B' : 'RETH 16B'}) + MPRDMA/REPS Multipath Ext</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        ${isAck || isNack
+          ? `• <strong>AETH (ACK Extended Transport Header, 4B)</strong>: Syndrome=<strong>${aethSyndrome}</strong> | MSN=${p.psn}<br/>`
+          : `• <strong>RETH (RDMA Extended Transport Header, 16B)</strong>: VA=0x00007f00${vaLow.toString(16).padStart(8,'0')} | R_Key=0x${rKey.toString(16).padStart(8,'0')} | DMALen=${dmaLen} B<br/>`}
+        • <strong>MPRDMA / REPS Ext</strong>: EV=${p.ev} (Plane P${p.plane}), Trimmed=${isTrim ? '<span style="color:#e879f9">Yes (Truncated Header Only)</span>' : 'No'}<br/>
+        ${uecRttDetailHtml}
+      </div>
+    </details>`;
+  } else if (headerView === 'uec11') {
+    layersHtml = `
+    <details open style="margin-bottom:6px">
+      <summary style="cursor:pointer; color:#4ade80; font-weight:bold">UEC v1.1 UFH (Unified Forwarding Header, 12B Compact MAC — IP 헤더 대체)</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        • Compact Src/Dst Fabric ID: <strong>xPU ${p.src} → xPU ${p.dst}</strong> (12B MAC-based UFH, v1.0 대비 최대 -20B 절감)<br/>
+        • Fabric Plane: Plane ${p.plane} (LS${srcTor} → US${spIdx} → LS${dstTor}) | Wire IPG: <strong>80B 고정</strong> (v1.0 ~84B 대비 Idle 축소)<br/>
+        • Scale Profile: Unified Local (0~1 tier Scale-Up) / Scale-Out 호환 프레임
+      </div>
+    </details>
+    <details open style="margin-bottom:6px">
+      <summary style="cursor:pointer; color:#facc15; font-weight:bold">UEC v1.1 CSIG (Congestion Signaling Telemetry Tag, 4B/8B)</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        • In-band Switch Telemetry: <strong>${p.ecn !== '0' ? 'MaxQueueDelay / MinAvailBW 경보 (ECN=' + p.ecn + ')' : 'Nominal Queue / Full Link BW'}</strong><br/>
+        • Bottleneck Hop Tag: Plane P${p.plane} Spine US${spIdx} → ACK 에코를 통해 송신단 PCM에 직접 전달
+      </div>
+    </details>
+    <details open>
+      <summary style="cursor:pointer; color:#e879f9; font-weight:bold">UEC v1.1 Transport (PDS / PCM Programmable Congestion Management)</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        • Packet Type: ${pktType} | PCM Mode: Programmable CC (CSIG 기반 동적 로드밸런싱)<br/>
+        • PSN: <strong>${p.psn}</strong> (0x${p.psn.toString(16).padStart(4,'0')}) | EV: <strong>${p.ev}</strong> (Plane P${p.plane})<br/>
+        • Trimmed Payload: ${isTrim ? '<span style="color:#e879f9">Yes (Truncated Header Only)</span>' : 'No'}<br/>
+        ${uecRttDetailHtml}
+      </div>
+    </details>`;
+  } else {
+    layersHtml = `
+    <details open style="margin-bottom:6px">
+      <summary style="cursor:pointer; color:#4ade80; font-weight:bold">Rail-Optimized L2 Fabric Header (xPU ${p.src} → P${p.plane}:LS${srcTor} → P${p.plane}:US${spIdx} → P${p.plane}:LS${dstTor} → xPU ${p.dst})</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        • Src MAC / Port: 02:00:00:00:${String(Number(p.src)).padStart(2,'0')}:${String(p.plane).padStart(2,'0')} (xPU ${p.src}, Port P${p.plane})<br/>
+        • Dst MAC / Port: 02:00:00:00:${String(Number(p.dst)).padStart(2,'0')}:${String(p.plane).padStart(2,'0')} (xPU ${p.dst}, Port P${p.plane})<br/>
+        • Fabric Plane: Plane ${p.plane} (Spine US${spIdx}, EtherType: ${srv6Mode !== 'off' ? '0x86DD IPv6/SRv6' : '0x88B5 UEC'})
+      </div>
+    </details>
+    ${netLayerHtml}
+    <details open>
+      <summary style="cursor:pointer; color:#e879f9; font-weight:bold">UEC Transport / MRC Header (PSN=${p.psn}, EV=${p.ev})</summary>
+      <div style="padding-left:14px; color:#cbd5e1">
+        • Packet Type: ${pktType}<br/>
+        • PSN (Packet Seq Num): <strong>${p.psn}</strong> (0x${p.psn.toString(16).padStart(4,'0')})<br/>
+        • EV (Entropy / Path ID): <strong>${p.ev}</strong> (Plane P${p.plane})<br/>
+        • Trimmed Payload: ${isTrim ? '<span style="color:#e879f9">Yes (Truncated Header Only)</span>' : 'No'}<br/>
+        ${uecRttDetailHtml}
+      </div>
+    </details>`;
+  }
 
   tree.innerHTML = `
     <details open style="margin-bottom:6px">
@@ -1178,33 +1484,54 @@ function renderWsHeaderDetails(p) {
         • Capture Point: ${p.node} | Extra: ${p.extra || '-'}
       </div>
     </details>
-    <details open style="margin-bottom:6px">
-      <summary style="cursor:pointer; color:#4ade80; font-weight:bold">Rail-Optimized L2 Fabric Header (Src: xPU ${p.src} → Dst: xPU ${p.dst})</summary>
-      <div style="padding-left:14px; color:#cbd5e1">
-        • Src MAC / Port: 02:00:00:00:${String(Number(p.src)).padStart(2,'0')}:${String(p.plane).padStart(2,'0')} (xPU ${p.src}, Port P${p.plane})<br/>
-        • Dst MAC / Port: 02:00:00:00:${String(Number(p.dst)).padStart(2,'0')}:${String(p.plane).padStart(2,'0')} (xPU ${p.dst}, Port P${p.plane})<br/>
-        • Fabric Plane: Plane ${p.plane} (Upper Switch US${p.plane % 2}) | EtherType: 0x88B5 (UEC)
-      </div>
-    </details>
-    <details open style="margin-bottom:6px">
-      <summary style="cursor:pointer; color:#facc15; font-weight:bold">IPv4 / Congestion Header (10.0.0.${p.src} → 10.0.0.${p.dst})</summary>
-      <div style="padding-left:14px; color:#cbd5e1">
-        • Version: 4 | Protocol: UEC (UDP-encap) | Total Length: ${p.len_bytes} B<br/>
-        • DSCP / ECN: ${ecnDesc}
-      </div>
-    </details>
-    <details open>
-      <summary style="cursor:pointer; color:#e879f9; font-weight:bold">UEC Transport / MRC Header (PSN=${p.psn}, EV=${p.ev})</summary>
-      <div style="padding-left:14px; color:#cbd5e1">
-        • Packet Type: ${pktType}<br/>
-        • PSN (Packet Seq Num): <strong>${p.psn}</strong> (0x${p.psn.toString(16).padStart(4,'0')})<br/>
-        • EV (Entropy / Path ID): <strong>${p.ev}</strong> (Plane P${p.plane})<br/>
-        • Trimmed Payload: ${isTrim ? '<span style="color:#e879f9">Yes (Truncated to 64B Header)</span>' : 'No'}
-      </div>
-    </details>`;
+    ${layersHtml}`;
 
-  // Synthesize 32-byte L2+IP+UEC header hex dump from actual packet fields
-  const b = [
+  // Synthesize L2 + Network + Transport header hex dump from actual packet fields
+  const b = (headerView === 'rdma') ? [
+    // L2 (14B) + IPv4 (20B, proto=17 UDP) + UDP (8B, dst=4791 0x12b7) + IB BTH (12B) + Extended BTH (AETH 4B / RETH prefix)
+    0x02, 0x00, 0x00, 0x00, Number(p.dst) & 0xff, p.plane & 0xff,
+    0x02, 0x00, 0x00, 0x00, Number(p.src) & 0xff, p.plane & 0xff,
+    0x08, 0x00,
+    0x45, Number(p.ecn) & 0x03, (p.len_bytes >> 8) & 0xff, p.len_bytes & 0xff,
+    (fidNum >> 8) & 0xff, fidNum & 0xff, 0x40, 0x00,
+    0x40, 0x11, 0x00, 0x00,
+    10, 0, 0, Number(p.src) & 0xff,
+    10, 0, 0, Number(p.dst) & 0xff,
+    (udpSrcPort >> 8) & 0xff, udpSrcPort & 0xff, 0x12, 0xb7,
+    ((p.len_bytes - 20) >> 8) & 0xff, (p.len_bytes - 20) & 0xff, 0x00, 0x00,
+    bthOpcode, 0x00, 0xff, 0xff,
+    0x00, (destQp >> 16) & 0xff, (destQp >> 8) & 0xff, destQp & 0xff,
+    (isAck || isNack) ? 0x00 : 0x80, (p.psn >> 16) & 0xff, (p.psn >> 8) & 0xff, p.psn & 0xff,
+    ...(isAck || isNack ? [
+      isNack ? 0x60 : (p.ecn !== '0' ? 0x01 : 0x00),
+      (p.psn >> 16) & 0xff, (p.psn >> 8) & 0xff, p.psn & 0xff,
+    ] : [
+      // RETH (16B): VA (8B) + R_Key (4B) + DMALen (4B)
+      0x00, 0x00, 0x7f, 0x00, (vaLow >> 24) & 0xff, (vaLow >> 16) & 0xff, (vaLow >> 8) & 0xff, vaLow & 0xff,
+      (rKey >> 24) & 0xff, (rKey >> 16) & 0xff, (rKey >> 8) & 0xff, rKey & 0xff,
+      (dmaLen >> 24) & 0xff, (dmaLen >> 16) & 0xff, (dmaLen >> 8) & 0xff, dmaLen & 0xff,
+    ]),
+  ] : (headerView === 'uec11') ? [
+    // UFH 12B Compact MAC + CSIG 4B Tag + UEC v1.1 PDS/PCM 8B
+    0x02, 0x00, 0x00, Number(p.dst) & 0xff, p.plane & 0xff, spIdx & 0xff,
+    0x02, 0x00, 0x00, Number(p.src) & 0xff, p.plane & 0xff, 0x11,
+    0xc5, 0x16, Number(p.ecn) & 0x03, p.plane & 0xff,
+    isTrim ? 0x03 : (isNack ? 0x04 : (isAck ? 0x02 : 0x01)),
+    p.plane & 0xff, (evNum >> 8) & 0xff, evNum & 0xff,
+    (p.psn >> 24) & 0xff, (p.psn >> 16) & 0xff, (p.psn >> 8) & 0xff, p.psn & 0xff,
+  ] : (srv6Mode !== 'off') ? [
+    0x02, 0x00, 0x00, 0x00, Number(p.dst) & 0xff, p.plane & 0xff,
+    0x02, 0x00, 0x00, 0x00, Number(p.src) & 0xff, p.plane & 0xff,
+    0x86, 0xdd,
+    0x60 | ((Number(p.ecn) & 0x03) << 2), 0x00, (evNum >> 8) & 0x0f, evNum & 0xff,
+    (p.len_bytes >> 8) & 0xff, p.len_bytes & 0xff, 0x2b, 0x40,
+    0xfc, 0x00, 0x00, p.plane & 0xff, 0x00, 0x00, 0x00, Number(p.src) & 0xff,
+    0xfc, 0x00, 0x01, p.plane & 0xff, 0x00, 0x00, 0x00, spIdx & 0xff,
+    0xfd, 0x06, 0x04, 0x01, 0x02, 0x00, 0x00, 0x00,
+    isTrim ? 0x03 : (p.event.includes('NACK') ? 0x04 : (p.event.includes('ACK') ? 0x02 : 0x01)),
+    p.plane & 0xff, (evNum >> 8) & 0xff, evNum & 0xff,
+    (p.psn >> 24) & 0xff, (p.psn >> 16) & 0xff, (p.psn >> 8) & 0xff, p.psn & 0xff,
+  ] : [
     0x02, 0x00, 0x00, 0x00, Number(p.dst) & 0xff, p.plane & 0xff,
     0x02, 0x00, 0x00, 0x00, Number(p.src) & 0xff, p.plane & 0xff,
     0x88, 0xb5,
@@ -1610,7 +1937,9 @@ async function runCustomTopo() {
         planes: topoModel.planes || 1,
         tiers: topoModel.tiers,
         traffic: document.getElementById('inTraffic').value,
+        flow_size: parseInt(document.getElementById('inFlowSize').value || '262144', 10),
         algo: document.getElementById('inAlgo').value,
+        srv6_mode: (document.getElementById('inSrv6Mode') && document.getElementById('inSrv6Mode').value) || 'off',
         fail_nodes: [...failNodes],
         fail_links: [...failLinks],
         fail_at_us: parseInt(document.getElementById('inFailAt').value || '0', 10),
@@ -1619,7 +1948,6 @@ async function runCustomTopo() {
         q_pkts: parseInt(document.getElementById('inQueue').value || '16', 10),
         ecn_low: parseInt(document.getElementById('inEcnLow').value || '4', 10),
         ecn_high: parseInt(document.getElementById('inEcnHigh').value || '12', 10),
-        end_us: parseInt(document.getElementById('inEndUs').value || '10000', 10),
         n_frames: parseInt(document.getElementById('inFrames').value || '16', 10),
       })
     });
@@ -1764,6 +2092,7 @@ def _run_custom_topology(cfg: dict) -> dict:
     planes = max(1, min(8, int(cfg.get("planes", 1))))
     tiers = int(cfg.get("tiers", 2))
     traffic = cfg.get("traffic", "incast")
+    flow_size = max(4096, min(67108864, int(cfg.get("flow_size", 262144))))
     algo = cfg.get("algo", "reps")
     fail_nodes = [x for x in cfg.get("fail_nodes", []) if x]
     fail_links = [x for x in cfg.get("fail_links", []) if x]
@@ -1783,49 +2112,86 @@ def _run_custom_topology(cfg: dict) -> dict:
         for s in range(0, nsrv, step):
             for d in range(0, nsrv, step):
                 if s != d:
-                    conns.append(f"{s}->{d} id {fid} start 0 size 262144")
+                    conns.append(f"{s}->{d} id {fid} start 0 size {flow_size}")
                     flow_endpoints_cm[str(fid)] = (str(s), str(d))
                     fid += 1
     else:
         dst = nsrv - 1
         for s in range(nsrv - 1):
-            conns.append(f"{s}->{dst} id {s + 1} start 0 size 262144")
+            conns.append(f"{s}->{dst} id {s + 1} start 0 size {flow_size}")
             flow_endpoints_cm[str(s + 1)] = (str(s), str(dst))
 
     cm_path.write_text(f"Nodes {nsrv}\nConnections {len(conns)}\n" + "\n".join(conns) + "\n")
 
     env = os.environ.copy()
     env["MRC_TRACE_FILE"] = str(trace_path)
+    env["MRC_PLANES"] = str(planes)
     failed_plane_ids = set()
     if fail_links:
-        # Include N{s}-P{r} -> LS{s//2}->US{r%2}, reverse direction, and LSx / LS_x variants
+        # Include plane-scoped N{s}-P{r} and P{r}:LS{t}-US{sp} -> P{r}:LS{t}->US{sp}, reverse direction, and LSx / LS_x variants
         bidir = []
         for lnk in fail_links:
             m_np = re.match(r"^N(\d+)-P(\d+)$", lnk)
+            m_plu = re.match(r"^P(\d+):LS(\d+)-US(\d+)$", lnk)
+            m_lu = re.match(r"^LS(\d+)-US(\d+)$", lnk)
             if m_np:
                 s_idx, r_idx = int(m_np.group(1)), int(m_np.group(2))
-                mapped = f"LS{s_idx // 2}->US{r_idx % 2}"
+                tor_idx = s_idx // 2
+                variants = {
+                    f"P{r_idx}:SRC{s_idx}->LS{tor_idx}",
+                    f"P{r_idx}:LS{tor_idx}->DST{s_idx}",
+                }
+            elif m_plu:
+                r_idx, tor_idx, sp_idx = int(m_plu.group(1)), int(m_plu.group(2)), int(m_plu.group(3))
+                variants = {
+                    f"P{r_idx}:LS{tor_idx}->US{sp_idx}",
+                    f"P{r_idx}:LS_{tor_idx}->US{sp_idx}",
+                }
+            elif m_lu:
+                tor_idx, sp_idx = int(m_lu.group(1)), int(m_lu.group(2))
+                mapped = f"LS{tor_idx}->US{sp_idx}"
                 variants = {mapped, re.sub(r"\bLS(\d+)\b", r"LS_\1", mapped)}
             else:
                 variants = {lnk, re.sub(r"\bLS(\d+)\b", r"LS_\1", lnk)}
             for v in list(variants):
                 bidir.append(v)
                 if "->" in v:
-                    a, b = v.split("->", 1)
-                    bidir.append(f"{b}->{a}")
+                    prefix, rest = (v.split(":", 1) if ":" in v else ("", v))
+                    a, b = rest.split("->", 1)
+                    rev = f"{b}->{a}"
+                    bidir.append(f"{prefix}:{rev}" if prefix else rev)
         env["MRC_FAIL_LINKS"] = ",".join(dict.fromkeys(bidir))
     if fail_nodes:
         expanded = []
+        fail_node_set = set(fail_nodes)
         for nd in fail_nodes:
-            m_us = re.match(r"^(?:US|P)(\d+)$", nd)
-            if m_us:
-                p_idx = int(m_us.group(1))
+            m_p = re.match(r"^P(\d+)$", nd)
+            m_pus = re.match(r"^P(\d+):US(\d+)$", nd)
+            m_pls = re.match(r"^P(\d+):LS(\d+)$", nd)
+            m_us = re.match(r"^US(\d+)$", nd)
+            m_ls = re.match(r"^LS(\d+)$", nd)
+            if m_p:
+                p_idx = int(m_p.group(1))
                 failed_plane_ids.add(p_idx)
-                expanded.append(f"US{p_idx % 2}")
+                expanded.append(f"P{p_idx}")
+            elif m_pus:
+                p_idx, sp_idx = int(m_pus.group(1)), int(m_pus.group(2))
+                expanded.append(f"P{p_idx}:US{sp_idx}")
+                if f"P{p_idx}:US0" in fail_node_set and f"P{p_idx}:US1" in fail_node_set:
+                    failed_plane_ids.add(p_idx)
+            elif m_pls:
+                p_idx, tor_idx = int(m_pls.group(1)), int(m_pls.group(2))
+                expanded.append(f"P{p_idx}:LS{tor_idx}")
+                expanded.append(f"P{p_idx}:LS_{tor_idx}")
+            elif m_us:
+                sp_idx = int(m_us.group(1)) % 2
+                expanded.append(f"US{sp_idx}")
+            elif m_ls:
+                tor_idx = int(m_ls.group(1))
+                expanded.append(f"LS{tor_idx}")
+                expanded.append(f"LS_{tor_idx}")
             else:
                 expanded.append(nd)
-                if re.match(r"^LS\d+$", nd):
-                    expanded.append("LS_" + nd[2:])
         env["MRC_FAIL_NODES"] = ",".join(dict.fromkeys(expanded))
     if fail_at_us > 0:
         env["MRC_FAIL_AT_US"] = str(fail_at_us)
@@ -1838,8 +2204,11 @@ def _run_custom_topology(cfg: dict) -> dict:
     q_pkts = max(4, min(512, int(cfg.get("q_pkts", 16))))
     ecn_low = max(1, min(q_pkts - 1, int(cfg.get("ecn_low", 4))))
     ecn_high = max(ecn_low + 1, min(q_pkts, int(cfg.get("ecn_high", 12))))
-    end_us = max(100, min(100000, int(cfg.get("end_us", 10000))))
+    default_end_us = max(5000, min(100000, flow_size // 256))
+    end_us = max(100, min(100000, int(cfg.get("end_us") or default_end_us)))
     n_frames = max(8, min(128, int(cfg.get("n_frames", 16))))
+    srv6_mode = cfg.get("srv6_mode", "off")
+    mtu_bytes = 4192 if srv6_mode == "srh" else (4160 if srv6_mode == "usid" else 4096)
 
     cmd = [
         str(BIN_UEC), "-o", str(out_dat),
@@ -1848,7 +2217,7 @@ def _run_custom_topology(cfg: dict) -> dict:
         "-sender_cc_only", "-sender_cc_algo", "nscc",
         "-load_balancing_algo", algo, "-sleek",
         "-queue_type", "composite_ecn", "-q", str(q_pkts), "-ecn", str(ecn_low), str(ecn_high),
-        "-cwnd", "30", "-mtu", "4096", "-paths", "16", "-linkspeed", str(linkspeed), "-end", str(end_us)
+        "-cwnd", "30", "-mtu", str(mtu_bytes), "-paths", "16", "-linkspeed", str(linkspeed), "-end", str(end_us)
     ]
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120, check=False)
     stdout = proc.stdout + "\n" + proc.stderr
@@ -1986,9 +2355,30 @@ def _run_custom_topology(cfg: dict) -> dict:
 
     frames = []
     all_ts = [r[0] for r in rows_parsed] + [t[0] for t in tx_rows]
+    _bucket_idx = lambda ts: 0
     if all_ts:
         max_ts = max(all_ts)
-        step = max(1, (max_ts + 1) // n_frames)
+        has_fault_cfg = bool(fail_nodes or fail_links)
+        recover_at_ns = recover_at_us * 1000
+        if has_fault_cfg and 0 < fail_at_ns < max_ts and n_frames >= 8:
+            if recover_at_ns > fail_at_ns and recover_at_ns < max_ts and n_frames >= 12:
+                before_cnt = max(2, min(3, n_frames // 5))
+                fail_cnt = max(2, min(5, (n_frames - before_cnt) // 3))
+                rec_cnt = n_frames - before_cnt - fail_cnt
+                frame_edges = (
+                    [round(i * fail_at_ns / before_cnt) for i in range(before_cnt)]
+                    + [fail_at_ns + round(j * (recover_at_ns - fail_at_ns) / fail_cnt) for j in range(fail_cnt)]
+                    + [recover_at_ns + round(k * (max_ts + 1 - recover_at_ns) / rec_cnt) for k in range(rec_cnt + 1)]
+                )
+            else:
+                before_cnt = max(2, min(4, n_frames // 4))
+                after_cnt = n_frames - before_cnt
+                frame_edges = [round(i * fail_at_ns / before_cnt) for i in range(before_cnt)] + [
+                    fail_at_ns + round(j * (max_ts + 1 - fail_at_ns) / after_cnt) for j in range(after_cnt + 1)
+                ]
+        else:
+            frame_edges = [round(i * (max_ts + 1) / n_frames) for i in range(n_frames + 1)]
+        _bucket_idx = lambda ts: min(n_frames - 1, max(0, bisect_right(frame_edges, ts) - 1))
         buckets = [defaultdict(lambda: {"ecn": 0, "trim": 0, "fail": 0}) for _ in range(n_frames)]
         tx_buckets = [[0] * planes for _ in range(n_frames)]
         reroute_buckets = [0] * n_frames
@@ -2005,11 +2395,11 @@ def _run_custom_topology(cfg: dict) -> dict:
         }) for _ in range(n_frames)]
 
         for ts_ns in reroute_ts:
-            bi = min(n_frames - 1, ts_ns // step)
+            bi = _bucket_idx(ts_ns)
             reroute_buckets[bi] += 1
 
         for ts_ns, flow_id, src_id, dst_id, psn_int, old_ev, old_num, new_ev, new_num in reroute_items:
-            bi = min(n_frames - 1, ts_ns // step)
+            bi = _bucket_idx(ts_ns)
             if len(frame_reroutes[bi]) < 50:
                 reason = "NACK/Trim 감지" if (flow_id, str(psn_int)) in trim_nack_keys else "Probe/타임아웃"
                 frame_reroutes[bi].append({
@@ -2026,7 +2416,7 @@ def _run_custom_topology(cfg: dict) -> dict:
                 })
 
         for ts_ns, ev_name, link, p_idx in rows_parsed:
-            bi = min(n_frames - 1, ts_ns // step)
+            bi = _bucket_idx(ts_ns)
             pkey = f"P{p_idx}:{link}"
             if ev_name == "SW_ECN":
                 buckets[bi][pkey]["ecn"] += 1
@@ -2036,11 +2426,11 @@ def _run_custom_topology(cfg: dict) -> dict:
                 buckets[bi][pkey]["fail"] += 1
 
         for ts_ns, ev_num in tx_rows:
-            bi = min(n_frames - 1, ts_ns // step)
+            bi = _bucket_idx(ts_ns)
             tx_buckets[bi][ev_num % planes] += 1
 
         for ts_ns, ev_name, flow_id, src_id, dst_id, psn_int, ev_str, ev_num in tx_detail_rows:
-            bi = min(n_frames - 1, ts_ns // step)
+            bi = _bucket_idx(ts_ns)
             fs = frame_flows[bi][flow_id]
             fs["src"] = src_id
             fs["dst"] = dst_id
@@ -2061,7 +2451,7 @@ def _run_custom_topology(cfg: dict) -> dict:
                 frame_ack_flows[bi][(flow_id, ev_num % planes, str(dst_id), str(src_id))] += 1
 
         for ts_ns, ev_name, where_raw, flow_id, src_id, dst_id, psn_int, ev_str, ev_num, ecn_flag, extra in timeline_raw:
-            bi = min(n_frames - 1, ts_ns // step)
+            bi = _bucket_idx(ts_ns)
             ep = flow_endpoints.get(flow_id, (src_id, dst_id))
             plane_lbl = f"P{ev_num % planes}"
             if ev_name == "SW_ECN":
@@ -2132,10 +2522,15 @@ def _run_custom_topology(cfg: dict) -> dict:
         cum_all = [0.0] * planes
         before_tx_total = 0
         for bi in range(n_frames):
-            t0_us = (bi * step) / 1000.0
-            t1_us = ((bi + 1) * step) / 1000.0
-            phase = "HEALTHY (NO FAULT)" if not has_fault else ("BEFORE FAIL" if t1_us <= fail_at_us else "AFTER FAIL")
+            t0_us = frame_edges[bi] / 1000.0
+            t1_us = frame_edges[bi + 1] / 1000.0
+            is_recovered = has_fault and recover_at_us > 0 and t0_us >= recover_at_us
             fault_active = has_fault and (t1_us > fail_at_us) and (recover_at_us == 0 or t0_us < recover_at_us)
+            phase = (
+                "HEALTHY (NO FAULT)" if not has_fault
+                else ("BEFORE FAIL" if t1_us <= fail_at_us
+                      else ("RECOVERED" if is_recovered else "AFTER FAIL"))
+            )
             active_fp = sorted(failed_plane_ids) if fault_active else []
             counts = list(tx_buckets[bi])
             if not fault_active:
@@ -2204,6 +2599,7 @@ def _run_custom_topology(cfg: dict) -> dict:
                 "phase": phase,
                 "link_heat": {k: dict(v) for k, v in buckets[bi].items()},
                 "plane_pct": plane_pct,
+                "plane_counts": list(use_counts),
                 "failed_planes": active_fp,
                 "reroute_cnt": reroute_buckets[bi],
                 "psn_min": f_psn_min,
@@ -2291,12 +2687,11 @@ def _run_custom_topology(cfg: dict) -> dict:
     )
 
     flow_packets_out = {}
-    pkt_step = max(1, (max([r[0] for r in rows_parsed] + [t[0] for t in tx_rows] + [1]) + 1) // n_frames) if (rows_parsed or tx_rows) else 1
     for fid, plist in flow_packets_raw.items():
         plist.sort(key=lambda x: (x["ts_ns"], x["psn"]))
         for idx, pk in enumerate(plist, 1):
             pk["no"] = idx
-            pk["frame_idx"] = min(n_frames - 1, pk["ts_ns"] // pkt_step)
+            pk["frame_idx"] = _bucket_idx(pk["ts_ns"])
         flow_packets_out[fid] = plist
 
     return {

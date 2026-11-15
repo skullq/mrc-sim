@@ -23,9 +23,10 @@
   ```
 - **브라우저 접속**: `http://127.0.0.1:8787` 또는 `http://localhost:8787` (원격 서버 시 `http://<서버IP>:8787`)
 
-### CLI 자동 검증 스위트 (`TC-01 ~ TC-10`) 단독 실행
+### CLI 자동 검증 스위트 (`TC-01 ~ TC-10`) 및 Playwright E2E 검증 실행
 ```bash
 python3 /root/mrc-sim/scripts/run_all_tests.py
+/tmp/pw-venv/bin/python3 /root/mrc-sim/tests/playwright_e2e_verify.py   # 대시보드 UI/CSV 41항목 E2E 검증
 ```
 
 ---
@@ -45,15 +46,15 @@ python3 /root/mrc-sim/scripts/run_all_tests.py
   - **보라/마젠타 (`#e879f9`)**: 패킷 페이로드 64B 절단 (`SW_TRIM`)
   - **빨간색 점선 (`#ef4444`)**: 장애 차단 (`FAIL 0%` / `SW_NODE_FAIL` / `SW_LINK_FAIL`)
   - **흐린 회색 (`#475569`)**: 해당 프레임에서 트래픽이 없는(`0%`) 유휴 링크
-- **4단계 순차 전이 패널**:
-  1. **장애 전 (Baseline)**: 8개 Plane 균등 분산 (`~12.5%`)
-  2. **장애 발생 및 감지 (Fault)**: `SW_NODE_FAIL` / `SW_LINK_FAIL` / `SW_ECN` / `SW_TRIM` / `TX_PROBE`
-  3. **우회 및 트래픽 재분배 (Reroute)**: `TX_RTX`, `SLEEK`, 전체 `EV` 전환 건수, `P0~P7` 누적 점유율 변화
-  4. **최종 마무리 결과 (Final Verdict)**: `PASS (rc=0)` 여부 및 `New` / `ACKs` 완주 통계
+- **4단계 순차 전이 & 복구(`RECOVERED`) 패널**:
+  1. **장애 전 (`BEFORE FAIL`)**: 8개 Plane 균등 분산 (`~12.5%`)
+  2. **장애 발생 및 감지 (`AFTER FAIL`)**: `SW_NODE_FAIL` / `SW_LINK_FAIL` / `SW_ECN` / `SW_TRIM` / `TX_PROBE`
+  3. **우회 및 트래픽 재분배 (`Reroute`)**: `TX_RTX`, `SLEEK`, 전체 `EV` 전환 건수, `P0~P7` 누적 점유율 변화
+  4. **장애 복구 (`RECOVERED`) & 최종 결과 (`Final Verdict`)**: `Recover At > 0` 설정 시 타임라인이 `BEFORE FAIL` → `AFTER FAIL` → `RECOVERED` 3구간으로 분할되어 복구 이후 트래픽 정상화 확인, `PASS (rc=0)` 및 Drop/RTX/FCT 요약
 
 - **단일 Flow 집중 트래킹 & Wireshark 패킷/헤더 분석기**:
   - 상단 드롭다운 또는 테이블 행 클릭으로 특정 Flow(예: `Flow 15`)를 선택하면, 토폴로지에 **순방향 데이터(파랑)**·**Trim 전 구간(보라: `Src→Plane→Dst`)**·**NACK 역방향(주황)**·**ACK 역방향(청록)** 화살표가 분리 표시됩니다.
-  - 동시에 **Wireshark 패킷 & 헤더 분석기**가 열려 패킷별 `Display Filter`(`DATA`, `TRIM`, `NACK`, `ACK`, `ECN`, `RTX/FAIL`, `PSN=..`), **L2 Rail / IPv4-ECN / UEC Transport 계층별 헤더 트리**, **Hex/ASCII 바이트 덤프**를 확인할 수 있습니다.
+  - 동시에 **Wireshark 패킷 & 헤더 분석기**가 열려 `Display Filter`(`DATA`, `TRIM`, `NACK`, `ACK`, `ECN`, `RTX/FAIL`, `PSN=..`), **Header View 선택기**(`UEC v1.0 UET (PDS/CMS)` / `RoCEv2 RDMA (UDP 4791 + BTH 0x0A RC RDMA_WRITE_ONLY + P_Key + PSN + 16B RETH(VA/R_Key/DMALen) / 4B AETH)` / `UEC v1.1 (UFH 12B-MAC + CSIG + PCM)`), `SRv6 (Off / SRH / uSID)` 계층 트리 및 **Hex/ASCII 바이트 덤프**를 확인할 수 있습니다.
 - **타임라인 재생 컨트롤**: `◀ 이전`, `▶ Play` / `⏸ Pause` / `↻ Replay`(마지막 프레임 도달 시 처음 `F00`부터 재시작), `다음 ▶`, `Loop ON/OFF`
 
 ---
@@ -67,9 +68,10 @@ python3 /root/mrc-sim/scripts/run_all_tests.py
 | **xPUs / Ports / Wiring / Tiers** | `8` / `8` / `Rail-Optimized` / `2-Tier` | `8 xPUs × 8 Ports` Rail-Optimized 2-Tier Leaf-Spine 고정 토폴로지 (`-nodes 8 -planes 8 -tiers 2`) |
 | **Traffic Pattern** | `All-to-All` / `Incast` | `All-to-All`: 모든 xPU 쌍 간 분산 트래픽(총 56 Flow) / `Incast`: 모든 송신자가 마지막 xPU로 집중 |
 | **Multipath Algo** (`-load_balancing_algo`) | `REPS` (`reps`, `freezing`, `oblivious`, `bitmap`, `mixed`) | 패킷 단위 `EV(Entropy Value)` 경로 선택 및 장애/혼잡 회피 알고리즘 |
-| **Fail At (us)** (`MRC_FAIL_AT_US`) | `20` (`0 ~ 100,000 us`) | 선택한 노드(`P0~P7`) 또는 링크(`N{s}-P{r}`)에 장애를 주입하는 시각 (`us`) |
-| **Recover At (us, 0=perm)** (`MRC_RECOVER_AT_US`) | `0` (`0 ~ 100,000 us`) | 장애 복구 시각 (`0`이면 영구 장애) |
-| **Max Test Time (us)** (`-end`) | `10,000` (`100 ~ 100,000 us`) | 시뮬레이션 최대 종료 시간 (`htsim_uec -end`) |
+| **Fail At (us)** (`MRC_FAIL_AT_US`) | `20` (`0 ~ 100,000 us`) | 선택한 노드(`P0~P7`, Leaf/Spine) 또는 링크(`N{s}-P{r}`, Uplink)에 장애를 주입하는 시각 (`us`) |
+| **Recover At (us, 0=perm)** (`MRC_RECOVER_AT_US`) | `0` (`0 ~ 100,000 us`) | 장애 복구 시각 (`0`이면 영구 장애, `> 0`이면 `RECOVERED` 구간 자동 분리) |
+| **Flow Size** (`-flowsize_kb`) | `2 MB` (`512 KB ~ 16 MB`) | Flow당 전송 데이터 크기. 모든 Flow 완료 시 시뮬레이터가 자동 종료됨 |
+| **SRv6 Mode** | `Off` / `SRH` / `uSID` | IPv6 SRv6 경로 인코딩(`SRH` 104B / `uSID` 94B Trim Offset) 및 Wireshark 헤더 표시 |
 | **Timeline Frames** | `16` (`16 / 32 / 64 / 128`) | 전체 트레이스를 분할해 시각화할 타임라인 프레임 개수 |
 | **Link Speed** (`-linkspeed`) | `100G` / `400G` | 링크 대역폭 (`100,000` / `400,000` Mbps). 속도 변경 시 권장 Queue/ECN 연동 가능 |
 | **Queue Size (pkts)** (`-q`) | `16` (`4 ~ 512`) | 스위치 출력 큐 크기 (패킷 단위, MTU `4096 B`). 초과 시 `SW_TRIM` 또는 `SW_BTS` 발생 |
