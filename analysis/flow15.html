@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MRC-SIM Flow 15 상세 분석 보고서 (Queue Size = 4)</title>
+<style>
+  :root {
+    --bg: #0f172a; --card: #1e293b; --sub: #0b1220; --border: #334155;
+    --text: #f1f5f9; --muted: #94a3b8;
+    --blue: #38bdf8; --green: #22c55e; --magenta: #e879f9; --orange: #fb923c; --yellow: #facc15;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); padding: 24px; line-height: 1.55; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  h1 { margin: 0 0 6px 0; font-size: 1.45rem; }
+  h2 { margin: 0 0 12px 0; font-size: 1.05rem; color: #93c5fd; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .val { font-size: 1.25rem; font-weight: 700; margin-top: 4px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
+  table { width: 100%; border-collapse: collapse; background: var(--sub); border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+  th, td { padding: 9px 11px; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.84rem; vertical-align: top; }
+  th { background: #162032; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; }
+  tr:last-child td { border-bottom: none; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.74rem; font-weight: 700; }
+  .b-pass { background: rgba(34,197,94,0.18); color: var(--green); }
+  .b-trim { background: rgba(232,121,249,0.2); color: var(--magenta); }
+  .b-nack { background: rgba(251,146,60,0.2); color: var(--orange); }
+  .b-rtx  { background: rgba(56,189,248,0.2); color: var(--blue); }
+  .b-wait { background: rgba(250,204,21,0.18); color: var(--yellow); }
+  .analysis-item { background: var(--sub); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .analysis-item strong { color: #e2e8f0; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>MRC-SIM Flow 15 상세 캡처 및 16개 타임라인 구간 분석 (Queue Size = 4)</h1>
+  <div class="subtitle">2-Tier Rail-Optimized (8 xPUs × 8 Ports, 100 Gbps, MTU 4096 B, cwnd=30, Queue=4, ECN=1/3, REPS+SLEEK)</div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">대상 Flow 경로</div>
+      <div class="val mono" style="color:var(--blue)">Flow 15 (xPU 2 → xPU 0)</div>
+      <div class="mono" style="color:var(--muted); margin-top:4px">uecSrc 14 · 262,144 B</div>
+    </div>
+    <div class="card">
+      <div class="label">전송 및 완주</div>
+      <div class="val"><span class="badge b-pass">PASS (rc=0)</span></div>
+      <div class="mono" style="margin-top:6px">TX: 66 · RTX: 3 · ACK: 25</div>
+    </div>
+    <div class="card">
+      <div class="label">Trim · NACK · Reroute</div>
+      <div class="val mono" style="color:var(--magenta)">Trim 6 · NACK 5</div>
+      <div class="mono" style="color:var(--muted); margin-top:4px">SW_TRIM 3 + RX_TRIM 3 · EV Reroute 0건</div>
+    </div>
+    <div class="card">
+      <div class="label">전체 시뮬레이션 요약</div>
+      <div class="val mono" style="font-size:1rem">New=3696 · Rtx=199</div>
+      <div class="mono" style="color:var(--muted); margin-top:4px">ACKs=1420 · NACKs=169 · sleek=45</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px">
+      <h2 style="margin:0">Flow 15 (xPU 2 → xPU 0) 토폴로지 경로 · Trim · NACK 다이어그램</h2>
+      <div class="mono" style="display:flex; flex-wrap:wrap; gap:12px; font-size:0.78rem; color:#cbd5e1">
+        <span><span style="color:#38bdf8">━━▶</span> 데이터 경로 (xPU 2 → Plane → xPU 0)</span>
+        <span><span style="color:#e879f9">━━▶</span> Trim (스위치 P1/P6/P7 → xPU 0)</span>
+        <span><span style="color:#fb923c">◀╌╌</span> NACK (xPU 0 → P1/P6/P7 → xPU 2)</span>
+      </div>
+    </div>
+    <div style="background:#0b1220; border:1px solid #334155; border-radius:8px; padding:10px; overflow-x:auto">
+      <svg width="1140" height="360" viewBox="0 0 1140 360">
+        <defs>
+          <marker id="aFwd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+          </marker>
+          <marker id="aTrim" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#e879f9"/>
+          </marker>
+          <marker id="aNack" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 10 5 L 0 9 z" fill="#fb923c"/>
+          </marker>
+        </defs>
+        <!-- Plane nodes (x = 90 + r*137, y = 65) -->
+        <g font-family="monospace" text-anchor="middle">
+          <circle cx="90"  cy="65" r="20" fill="#0f766e" stroke="#94a3b8" stroke-width="1.4"/><text x="90"  y="69" fill="#f8fafc" font-size="11" font-weight="bold">P0</text><text x="90"  y="36" fill="#94a3b8" font-size="10">Plane 0</text>
+          <circle cx="227" cy="65" r="20" fill="#701a75" stroke="#e879f9" stroke-width="2"/><text x="227" y="69" fill="#f8fafc" font-size="11" font-weight="bold">P1</text><text x="227" y="36" fill="#f5d0fe" font-size="10">Plane 1 (Trim)</text>
+          <circle cx="364" cy="65" r="20" fill="#0f766e" stroke="#94a3b8" stroke-width="1.4"/><text x="364" y="69" fill="#f8fafc" font-size="11" font-weight="bold">P2</text><text x="364" y="36" fill="#94a3b8" font-size="10">Plane 2</text>
+          <circle cx="501" cy="65" r="20" fill="#0f766e" stroke="#94a3b8" stroke-width="1.4"/><text x="501" y="69" fill="#f8fafc" font-size="11" font-weight="bold">P3</text><text x="501" y="36" fill="#94a3b8" font-size="10">Plane 3</text>
+          <circle cx="638" cy="65" r="20" fill="#0f766e" stroke="#94a3b8" stroke-width="1.4"/><text x="638" y="69" fill="#f8fafc" font-size="11" font-weight="bold">P4</text><text x="638" y="36" fill="#94a3b8" font-size="10">Plane 4</text>
+          <circle cx="775" cy="65" r="20" fill="#0f766e" stroke="#94a3b8" stroke-width="1.4"/><text x="775" y="69" fill="#f8fafc" font-size="11" font-weight="bold">P5</text><text x="775" y="36" fill="#94a3b8" font-size="10">Plane 5</text>
+          <circle cx="912" cy="65" r="20" fill="#701a75" stroke="#e879f9" stroke-width="2"/><text x="912" y="69" fill="#f8fafc" font-size="11" font-weight="bold">P6</text><text x="912" y="36" fill="#f5d0fe" font-size="10">Plane 6 (Trim)</text>
+          <circle cx="1049" cy="65" r="20" fill="#701a75" stroke="#e879f9" stroke-width="2"/><text x="1049" y="69" fill="#f8fafc" font-size="11" font-weight="bold">P7</text><text x="1049" y="36" fill="#f5d0fe" font-size="10">Plane 7 (Trim)</text>
+        </g>
+
+        <!-- Data paths: xPU 2 (cx=364, y=235) -> Planes -> xPU 0 (cx=90, y=235) -->
+        <!-- xPU 2 -> P0, P2, P3, P4, P5 (normal blue) -->
+        <line x1="364" y1="235" x2="90"  y2="85" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <line x1="364" y1="235" x2="364" y2="85" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <line x1="364" y1="235" x2="501" y2="85" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <line x1="364" y1="235" x2="638" y2="85" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <line x1="364" y1="235" x2="775" y2="85" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <!-- Planes -> xPU 0 (normal blue) -->
+        <line x1="90"  y1="85" x2="90" y2="235" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <line x1="364" y1="85" x2="90" y2="235" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <line x1="501" y1="85" x2="90" y2="235" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <line x1="638" y1="85" x2="90" y2="235" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+        <line x1="775" y1="85" x2="90" y2="235" stroke="#38bdf8" stroke-width="1.8" stroke-opacity="0.65" stroke-dasharray="6,4"/>
+
+        <!-- Upward data arrows from xPU 2 to P1, P6, P7 -->
+        <path d="M 364 235 L 315 182" fill="none" stroke="#38bdf8" stroke-width="2.4" marker-end="url(#aFwd)"/>
+        <line x1="315" y1="182" x2="227" y2="85" stroke="#38bdf8" stroke-width="2.2" stroke-opacity="0.8"/>
+        <path d="M 364 235 L 560 181" fill="none" stroke="#38bdf8" stroke-width="2.4" marker-end="url(#aFwd)"/>
+        <line x1="560" y1="181" x2="912" y2="85" stroke="#38bdf8" stroke-width="2.2" stroke-opacity="0.8"/>
+        <path d="M 364 235 L 610 181" fill="none" stroke="#38bdf8" stroke-width="2.4" marker-end="url(#aFwd)"/>
+        <line x1="610" y1="181" x2="1049" y2="85" stroke="#38bdf8" stroke-width="2.2" stroke-opacity="0.8"/>
+
+        <!-- Trim arrows: P1, P6, P7 -> xPU 0 (magenta downward) -->
+        <path d="M 227 85 L 180 135" fill="none" stroke="#e879f9" stroke-width="2.8" marker-end="url(#aTrim)"/>
+        <path d="M 180 135 L 94 229" fill="none" stroke="#e879f9" stroke-width="2.8" marker-end="url(#aTrim)"/>
+        <rect x="142" y="122" width="76" height="14" rx="4" fill="#3b0764" stroke="#e879f9" stroke-width="0.9"/><text x="180" y="132" fill="#f5d0fe" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">TRIM P1→x0</text>
+
+        <path d="M 912 85 L 620 138" fill="none" stroke="#e879f9" stroke-width="2.8" marker-end="url(#aTrim)"/>
+        <path d="M 620 138 L 96 231" fill="none" stroke="#e879f9" stroke-width="2.8" marker-end="url(#aTrim)"/>
+        <rect x="582" y="124" width="76" height="14" rx="4" fill="#3b0764" stroke="#e879f9" stroke-width="0.9"/><text x="620" y="134" fill="#f5d0fe" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">TRIM P6→x0</text>
+
+        <path d="M 1049 85 L 720 136" fill="none" stroke="#e879f9" stroke-width="2.8" marker-end="url(#aTrim)"/>
+        <path d="M 720 136 L 98 233" fill="none" stroke="#e879f9" stroke-width="2.8" marker-end="url(#aTrim)"/>
+        <rect x="682" y="122" width="76" height="14" rx="4" fill="#3b0764" stroke="#e879f9" stroke-width="0.9"/><text x="720" y="132" fill="#f5d0fe" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">TRIM P7→x0</text>
+
+        <!-- NACK reverse arrows: xPU 0 -> P1, P6, P7 -> xPU 2 (orange dashed) -->
+        <path d="M 96 235 L 148 180" fill="none" stroke="#fb923c" stroke-width="2.4" stroke-dasharray="5,3" marker-end="url(#aNack)"/>
+        <line x1="148" y1="180" x2="232" y2="85" stroke="#fb923c" stroke-width="2.4" stroke-dasharray="5,3"/>
+        <path d="M 232 85 L 312 172" fill="none" stroke="#fb923c" stroke-width="2.4" stroke-dasharray="5,3" marker-end="url(#aNack)"/>
+        <path d="M 312 172 L 369 229" fill="none" stroke="#fb923c" stroke-width="2.4" stroke-dasharray="5,3" marker-end="url(#aNack)"/>
+        <rect x="110" y="176" width="78" height="14" rx="4" fill="#431407" stroke="#fb923c" stroke-width="0.9"/><text x="149" y="186" fill="#fed7aa" text-anchor="middle" font-size="8.5" font-weight="bold" font-family="monospace">NACK x0→x2</text>
+
+        <!-- xPU boxes (y=235..300) -->
+        <g font-family="monospace" text-anchor="middle">
+          <!-- xPU 0 [DST] -->
+          <rect x="54" y="220" width="72" height="15" rx="4" fill="#15803d"/><text x="90" y="231" fill="#fff" font-size="8.5" font-weight="bold">목적지 (DST)</text>
+          <rect x="42" y="235" width="96" height="58" rx="8" fill="#1e293b" stroke="#22c55e" stroke-width="2.4"/>
+          <text x="90" y="270" fill="#f1f5f9" font-size="11" font-weight="bold">xPU 0 [DST]</text>
+          <!-- xPU 1 (dimmed) -->
+          <rect x="179" y="235" width="96" height="58" rx="8" fill="#1e293b" stroke="#475569" opacity="0.25"/>
+          <text x="227" y="270" fill="#e2e8f0" opacity="0.25" font-size="11" font-weight="bold">xPU 1</text>
+          <!-- xPU 2 [SRC] -->
+          <rect x="328" y="220" width="72" height="15" rx="4" fill="#1d4ed8"/><text x="364" y="231" fill="#fff" font-size="8.5" font-weight="bold">출발 (SRC)</text>
+          <rect x="316" y="235" width="96" height="58" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="2.4"/>
+          <text x="364" y="270" fill="#f1f5f9" font-size="11" font-weight="bold">xPU 2 [SRC]</text>
+          <!-- xPU 3..7 (dimmed) -->
+          <rect x="453" y="235" width="96" height="58" rx="8" fill="#1e293b" stroke="#475569" opacity="0.25"/><text x="501" y="270" fill="#e2e8f0" opacity="0.25" font-size="11" font-weight="bold">xPU 3</text>
+          <rect x="590" y="235" width="96" height="58" rx="8" fill="#1e293b" stroke="#475569" opacity="0.25"/><text x="638" y="270" fill="#e2e8f0" opacity="0.25" font-size="11" font-weight="bold">xPU 4</text>
+          <rect x="727" y="235" width="96" height="58" rx="8" fill="#1e293b" stroke="#475569" opacity="0.25"/><text x="775" y="270" fill="#e2e8f0" opacity="0.25" font-size="11" font-weight="bold">xPU 5</text>
+          <rect x="864" y="235" width="96" height="58" rx="8" fill="#1e293b" stroke="#475569" opacity="0.25"/><text x="912" y="270" fill="#e2e8f0" opacity="0.25" font-size="11" font-weight="bold">xPU 6</text>
+          <rect x="1001" y="235" width="96" height="58" rx="8" fill="#1e293b" stroke="#475569" opacity="0.25"/><text x="1049" y="270" fill="#e2e8f0" opacity="0.25" font-size="11" font-weight="bold">xPU 7</text>
+        </g>
+
+        <!-- Bottom Flow Arc: xPU 2 -> xPU 0 -->
+        <path d="M 364 295 Q 227 345 90 295" fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-dasharray="6,4" marker-end="url(#aFwd)"/>
+        <text x="227" y="340" fill="#93c5fd" text-anchor="middle" font-size="11" font-weight="bold" font-family="monospace">Flow 15: 출발 xPU 2 → 목적지 xPU 0 (TX 66 · RTX 3 · Trim 3 · NACK 3)</text>
+      </svg>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>1. Flow 15 (xPU 2 → xPU 0) 16개 타임라인 구간별 캡처</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>구간</th>
+            <th>시각 범위</th>
+            <th>송신/수신/제어 카운트</th>
+            <th>TX PSN</th>
+            <th>활성 Plane 분포</th>
+            <th>주요 이벤트 상세</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="mono"><strong>F00</strong></td><td class="mono">0.00 ~ 2.27 us</td><td class="mono">TX_DATA: 18</td><td class="mono">0 ~ 14</td><td class="mono">P1:2 P2:2 P3:2 P4:2 P5:2 P6:2 P7:2 P0:1</td><td>초기 cwnd=30 버스트 시작</td></tr>
+          <tr><td class="mono"><strong>F01</strong></td><td class="mono">2.27 ~ 4.55 us</td><td class="mono">TX_DATA: 10, <span class="badge b-trim">SW_TRIM: 1</span>, RX_DATA: 8</td><td class="mono">15 ~ 22</td><td class="mono">P0:4 P4:1 P3:2 P1:1</td><td class="mono">4.31us SW_TRIM: xPU 2 → LS0-&gt;DST0 (P1) → xPU 0 | PSN 8 | 0x0009 (ARRIVING_TRIM)</td></tr>
+          <tr><td class="mono"><strong>F02</strong></td><td class="mono">4.55 ~ 6.83 us</td><td class="mono">TX_DATA: 2, RX_DATA: 5, RX_TRIM: 1, <span class="badge b-nack">TX_NACK: 1</span></td><td class="mono">23 ~ 29</td><td class="mono">P6:1 P7:3 P1:2 P2:1</td><td class="mono">5.61us RX_TRIM &amp; TX_NACK: xPU 0 → xPU 2 | PSN 8 | 0x0009 (P1)</td></tr>
+          <tr style="background:rgba(250,204,21,0.06)"><td class="mono"><strong>F03</strong></td><td class="mono">6.83 ~ 9.10 us</td><td class="mono">RX_DATA: 11, <span class="badge b-trim">SW_TRIM: 1</span> <span class="badge b-wait">cwnd 대기</span></td><td class="mono">-</td><td class="mono">-</td><td class="mono">cwnd=30 소진 후 ACK/NACK 대기 · 8.90us SW_TRIM: LS0-&gt;DST0 (P6) PSN 23 (BOOTED_TRIM)</td></tr>
+          <tr><td class="mono"><strong>F04</strong></td><td class="mono">9.10 ~ 11.38 us</td><td class="mono">RX_DATA: 4, RX_TRIM: 1, <span class="badge b-nack">TX_NACK: 1</span>, <span class="badge b-nack">RX_NACK: 1</span></td><td class="mono">-</td><td class="mono">-</td><td class="mono">9.92us TX_NACK PSN 23 (P6) · 10.89us RX_NACK PSN 8 (P1, cwnd↓ &amp; RTX 등록)</td></tr>
+          <tr><td class="mono"><strong>F05</strong></td><td class="mono">11.38 ~ 13.65 us</td><td class="mono"><span class="badge b-rtx">TX_RTX: 1</span>, TX_DATA: 11, RX_ACK: 5</td><td class="mono">1 ~ 37</td><td class="mono">P1:2 P3:1 P2:2 P5:2 P0:1 P7:1</td><td class="mono">12.20us TX_RTX: PSN 8 (0x0009, P1) 재전송 및 후속 TX_DATA 재개</td></tr>
+          <tr><td class="mono"><strong>F06</strong></td><td class="mono">13.65 ~ 15.93 us</td><td class="mono">TX_DATA: 6, <span class="badge b-trim">SW_TRIM: 1</span>, RX_DATA: 10, <span class="badge b-nack">RX_NACK: 1</span>, <span class="badge b-rtx">TX_RTX: 1</span>, RX_ACK: 5</td><td class="mono">11 ~ 45</td><td class="mono">P4:3 P6:1 P7:2 P0:1 P3:1 P2:1</td><td class="mono">14.22us RX_NACK PSN 23 (P6) · 14.50us TX_RTX PSN 23 (0x0006, P6)</td></tr>
+          <tr><td class="mono"><strong>F07</strong></td><td class="mono">15.93 ~ 18.20 us</td><td class="mono">RX_DATA: 10, RX_ACK: 2, TX_DATA: 2, <span class="badge b-trim">SW_TRIM: 1</span></td><td class="mono">24 ~ 54</td><td class="mono">P1:2 P7:2 P2:1 P4:2 P5:1 P6:1</td><td class="mono">17.50us SW_TRIM: xPU 2 → LS0-&gt;DST0 (P7) → xPU 0 | PSN 36 | 0x000f (ARRIVING_TRIM)</td></tr>
+          <tr><td class="mono"><strong>F08</strong></td><td class="mono">18.20 ~ 20.48 us</td><td class="mono">RX_DATA: 7, RX_TRIM: 1, <span class="badge b-nack">TX_NACK: 1</span>, RX_ACK: 3, TX_DATA: 7</td><td class="mono">55 ~ 56</td><td class="mono">P6:1 P2:1</td><td class="mono">18.51us RX_TRIM &amp; TX_NACK: xPU 0 → xPU 2 | PSN 36 | 0x000f (P7)</td></tr>
+          <tr><td class="mono"><strong>F09</strong></td><td class="mono">20.48 ~ 22.75 us</td><td class="mono">RX_ACK: 4, RX_DATA: 2</td><td class="mono">-</td><td class="mono">P1:1</td><td>수신 및 ACK 진행</td></tr>
+          <tr><td class="mono"><strong>F10</strong></td><td class="mono">22.75 ~ 25.02 us</td><td class="mono">RX_DATA: 9, RX_ACK: 1, <span class="badge b-nack">RX_NACK: 1</span>, <span class="badge b-rtx">TX_RTX: 1</span></td><td class="mono">33 ~ 65</td><td class="mono">P5:2 P7:1 P6:2 P2:1 P1:2 P3:1</td><td class="mono">24.15us RX_NACK PSN 36 (P7) · 24.76us TX_RTX PSN 36 (0x000f, P7)</td></tr>
+          <tr><td class="mono"><strong>F11</strong></td><td class="mono">25.02 ~ 27.30 us</td><td class="mono">RX_ACK: 4</td><td class="mono">-</td><td class="mono">-</td><td>재전송 완료 후 잔여 ACK 수신</td></tr>
+          <tr><td class="mono"><strong>F12</strong></td><td class="mono">27.30 ~ 29.57 us</td><td class="mono">RX_ACK: 2</td><td class="mono">-</td><td class="mono">-</td><td>잔여 ACK 수신</td></tr>
+          <tr><td class="mono"><strong>F13</strong></td><td class="mono">29.57 ~ 31.85 us</td><td class="mono">-</td><td class="mono">-</td><td class="mono">-</td><td>이벤트 없음</td></tr>
+          <tr><td class="mono"><strong>F14</strong></td><td class="mono">31.85 ~ 34.12 us</td><td class="mono">-</td><td class="mono">-</td><td class="mono">-</td><td>이벤트 없음</td></tr>
+          <tr><td class="mono"><strong>F15</strong></td><td class="mono">34.12 ~ 36.40 us</td><td class="mono">-</td><td class="mono">-</td><td class="mono">-</td><td>Flow 15 전송 완료 이후 전체 종료 구간</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. Trim → NACK → Slow Down → RTX 핵심 이벤트 연대기</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr><th>시각 (us)</th><th>이벤트</th><th>PSN</th><th>EV / Plane</th><th>위치 / 경로</th><th>비고</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="mono">0.33 us</td><td class="mono">TX_DATA</td><td class="mono">8</td><td class="mono">0x0009 (P1)</td><td class="mono">xPU 2 → xPU 0</td><td>초기 cwnd=30 버스트</td></tr>
+          <tr><td class="mono">4.31 us</td><td><span class="badge b-trim">SW_TRIM</span></td><td class="mono">8</td><td class="mono">0x0009 (P1)</td><td class="mono">LS0-&gt;DST0(0) (xPU 2 → xPU 0)</td><td>ARRIVING_TRIM (큐=4 초과)</td></tr>
+          <tr><td class="mono">5.61 us</td><td class="mono">RX_TRIM / <span class="badge b-nack">TX_NACK</span></td><td class="mono">8</td><td class="mono">0x0009 (P1)</td><td class="mono">xPU 0 → xPU 2</td><td>역방향 NACK 송출</td></tr>
+          <tr><td class="mono">10.89 us</td><td><span class="badge b-nack">RX_NACK</span></td><td class="mono">8</td><td class="mono">0x0009 (P1)</td><td class="mono">xPU 2 수신</td><td>cwnd 축소 &amp; RTX 큐 등록</td></tr>
+          <tr><td class="mono">12.20 us</td><td><span class="badge b-rtx">TX_RTX</span></td><td class="mono">8</td><td class="mono">0x0009 (P1)</td><td class="mono">xPU 2 → xPU 0</td><td>재전송 수행</td></tr>
+          <tr><td class="mono">4.59 us</td><td class="mono">TX_DATA</td><td class="mono">23</td><td class="mono">0x0006 (P6)</td><td class="mono">xPU 2 → xPU 0</td><td>-</td></tr>
+          <tr><td class="mono">8.90 us</td><td><span class="badge b-trim">SW_TRIM</span></td><td class="mono">23</td><td class="mono">0x0006 (P6)</td><td class="mono">LS0-&gt;DST0(0) (xPU 2 → xPU 0)</td><td>BOOTED_TRIM (큐=4 초과)</td></tr>
+          <tr><td class="mono">9.92 us</td><td class="mono">RX_TRIM / <span class="badge b-nack">TX_NACK</span></td><td class="mono">23</td><td class="mono">0x0006 (P6)</td><td class="mono">xPU 0 → xPU 2</td><td>역방향 NACK 송출</td></tr>
+          <tr><td class="mono">14.22 us</td><td><span class="badge b-nack">RX_NACK</span></td><td class="mono">23</td><td class="mono">0x0006 (P6)</td><td class="mono">xPU 2 수신</td><td>cwnd 축소 &amp; RTX 큐 등록</td></tr>
+          <tr><td class="mono">14.50 us</td><td><span class="badge b-rtx">TX_RTX</span></td><td class="mono">23</td><td class="mono">0x0006 (P6)</td><td class="mono">xPU 2 → xPU 0</td><td>재전송 수행</td></tr>
+          <tr><td class="mono">13.19 us</td><td class="mono">TX_DATA</td><td class="mono">36</td><td class="mono">0x000f (P7)</td><td class="mono">xPU 2 → xPU 0</td><td>-</td></tr>
+          <tr><td class="mono">17.50 us</td><td><span class="badge b-trim">SW_TRIM</span></td><td class="mono">36</td><td class="mono">0x000f (P7)</td><td class="mono">LS0-&gt;DST0(0) (xPU 2 → xPU 0)</td><td>ARRIVING_TRIM (큐=4 초과)</td></tr>
+          <tr><td class="mono">18.51 us</td><td class="mono">RX_TRIM / <span class="badge b-nack">TX_NACK</span></td><td class="mono">36</td><td class="mono">0x000f (P7)</td><td class="mono">xPU 0 → xPU 2</td><td>역방향 NACK 송출</td></tr>
+          <tr><td class="mono">24.15 us</td><td><span class="badge b-nack">RX_NACK</span></td><td class="mono">36</td><td class="mono">0x000f (P7)</td><td class="mono">xPU 2 수신</td><td>cwnd 축소 &amp; RTX 큐 등록</td></tr>
+          <tr><td class="mono">24.76 us</td><td><span class="badge b-rtx">TX_RTX</span></td><td class="mono">36</td><td class="mono">0x000f (P7)</td><td class="mono">xPU 2 → xPU 0</td><td>재전송 수행</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3. 상세 기술 분석</h2>
+    <div class="analysis-item">
+      <strong>(1) 왜 F00~F02에 30개 송신 후 F03에서 TX가 0인가?</strong><br/>
+      Flow 15는 초기 윈도우 <code>cwnd = 30</code>에 맞춰 <code>F00(18) + F01(10) + F02(2) = 30</code>개 패킷을 연속 송신한 뒤 윈도우가 가득 차 송신을 일시 정지합니다. <code>F03 (6.83~9.10us)</code>은 패킷이 비어 있는 구간이 아니라, 먼저 보낸 패킷이 수신측(<code>xPU 0</code>)에 도착(<code>RX_DATA: 11</code>)하고 스위치에서 Trim(PSN 23) 및 역방향 NACK이 돌아오는 RTT 대기 구간입니다.
+    </div>
+    <div class="analysis-item">
+      <strong>(2) Trim 발생 지점과 원인</strong><br/>
+      Flow 15에서 발생한 3건의 <code>SW_TRIM</code>(PSN 8 @ 4.31us, PSN 23 @ 8.90us, PSN 36 @ 17.50us)은 모두 목적지 ToR 다운링크인 <code>LS0-&gt;DST0(0)</code>에서 발생했습니다. All-to-All 트래픽 특성상 <code>xPU 1~7</code>이 동시에 <code>xPU 0</code>으로 전송하므로 <code>LS0-&gt;DST0</code> 출력 큐(Queue=4)가 일시적으로 포화되어 Trim(<code>ARRIVING_TRIM</code> / <code>BOOTED_TRIM</code>)이 발생했습니다.
+    </div>
+    <div class="analysis-item">
+      <strong>(3) NACK 전달 및 Slow Down 동작</strong><br/>
+      Trim된 64B 헤더가 목적지 <code>xPU 0</code>에 도착하면 즉시 역방향으로 <code>TX_NACK</code>을 송출(5.61us, 9.92us, 18.51us)하고, 약 4.3~5.6us(반환 RTT) 뒤 송신측 <code>xPU 2</code>가 <code>RX_NACK</code>을 수신(10.89us, 14.22us, 24.15us)합니다. <code>RX_NACK</code> 수신 후 송신 윈도우(<code>cwnd</code>)가 축소되어 <code>F05~F08</code> 구간의 구간당 송신량이 초기 18개 → 2~11개로 완만하게 줄어드는 Slow Down이 관찰됩니다.
+    </div>
+    <div class="analysis-item" style="margin-bottom:0">
+      <strong>(4) 왜 EV Reroute 건수가 0건인가?</strong><br/>
+      이번 실행은 물리 링크/노드 장애(Blackhole)가 없는 <code>Queue=4</code> 혼잡 테스트이므로, <code>PSN 8</code>, <code>PSN 23</code>, <code>PSN 36</code>이 모두 <code>TX_RTX</code> 시 동일 EV(<code>0x0009</code>, <code>0x0006</code>, <code>0x000f</code>)로 재전송되어도 정상 복구(<code>rc=0</code>, 전체 66개 패킷 완주)되었습니다. 반면 특정 Plane/링크에 장애(Fail)를 주입하거나 대규모 혼잡이 누적될 경우 REPS가 문제 EV를 회피해 다른 건강한 EV/Plane으로 우회(Reroute)하게 됩니다.
+    </div>
+  </div>
+</div>
+</body>
+</html>

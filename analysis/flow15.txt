@@ -1,0 +1,104 @@
+================================================================================
+MRC-SIM Flow 15 상세 캡처 및 16개 타임라인 구간 분석 보고서 (Queue Size = 4)
+================================================================================
+1. 시뮬레이션 실행 조건
+--------------------------------------------------------------------------------
+- 토폴로지       : 2-Tier Rail-Optimized (8 xPUs × 8 Ports/xPU, -nodes 8 -planes 8 -tiers 2)
+- 트래픽 패턴    : All-to-All (총 56개 Flow, Flow당 262,144 B = 64 pkts + 헤더 = 66 TX_DATA)
+- 링크 속도      : 100 Gbps (100,000 Mb/s), MTU 4096 B, 초기 cwnd = 30 pkts
+- 큐 / ECN 설정  : Queue Size = 4 pkts (16,384 B), ECN Low = 1 pkt, ECN High = 3 pkts
+- 로드밸런싱     : REPS (-load_balancing_algo reps) + SLEEK (-sleek)
+- 전체 결과      : rc = 0 (정상 완주)
+  • 전체 통계    : New=3696, Rtx=199, ACKs=1420, NACKs=169, sleek_pkts=45
+  • Flow 15 요약 : xPU 2 → xPU 0 (uecSrc 14) | TX=66, RTX=3, ACK=25, Trim=6(SW 3+RX 3), NACK=5(TX 3+RX 2/3), EV Reroute=0건
+  • 전체 시간축  : 0.00 ~ 45.739 us (16개 프레임, 프레임당 약 2.858 us; 대시보드 프레임은 이벤트 분포 기준 분할)
+
+================================================================================
+2. Flow 15 (xPU 2 → xPU 0) 16개 타임라인 구간별 캡처
+================================================================================
+[구간]  [시각 범위]          [송신/수신/제어 카운트 (raw trace)]                 [TX PSN]   [활성 Plane 분포]
+--------------------------------------------------------------------------------
+F00     0.00 ~  2.27 us   TX_DATA:18                                          0 ~ 14    P1:2 P2:2 P3:2 P4:2 P5:2 P6:2 P7:2 P0:1
+F01     2.27 ~  4.55 us   TX_DATA:10, SW_TRIM:1, RX_DATA:8                    15 ~ 22   P0:4 P4:1 P3:2 P1:1
+                          └─ 4.31us SW_TRIM: xPU 2 → LS0->DST0 (P1) → xPU 0 | PSN 8 | EV 0x0009 (ARRIVING_TRIM)
+F02     4.55 ~  6.83 us   TX_DATA:2, RX_DATA:5, RX_TRIM:1, TX_NACK:1          23 ~ 29   P6:1 P7:3 P1:2 P2:1
+                          └─ 5.61us RX_TRIM & TX_NACK: xPU 0 → xPU 2 | PSN 8 | EV 0x0009 (P1)
+F03     6.83 ~  9.10 us   RX_DATA:11, SW_TRIM:1                               -         (송신 대기: cwnd=30 소진, ACK/NACK 대기)
+                          └─ 8.90us SW_TRIM: xPU 2 → LS0->DST0 (P6) → xPU 0 | PSN 23 | EV 0x0006 (BOOTED_TRIM)
+F04     9.10 ~ 11.38 us   RX_DATA:4, RX_TRIM:1, TX_NACK:1, RX_NACK:1          -         (9.92us TX_NACK PSN 23, 10.89us RX_NACK PSN 8)
+                          └─ 9.92us RX_TRIM & TX_NACK: xPU 0 → xPU 2 | PSN 23 | EV 0x0006 (P6)
+                          └─ 10.89us RX_NACK: xPU 0 → xPU 2 | PSN 8 | EV 0x0009 (P1, cwnd 축소 & RTX 큐 등록)
+F05    11.38 ~ 13.65 us   TX_RTX:1, TX_DATA:11, RX_ACK:5                      1 ~ 37    P1:2 P3:1 P2:2 P5:2 P0:1 P7:1
+                          └─ 12.20us TX_RTX: PSN 8 (EV 0x0009, P1) 재전송 + 후속 TX_DATA 재개
+F06    13.65 ~ 15.93 us   TX_DATA:6, SW_TRIM:1, RX_DATA:10, RX_NACK:1,        11 ~ 45   P4:3 P6:1 P7:2 P0:1 P3:1 P2:1
+                          TX_RTX:1, RX_ACK:5
+                          └─ 14.22us RX_NACK: xPU 0 → xPU 2 | PSN 23 | EV 0x0006 (P6)
+                          └─ 14.50us TX_RTX: PSN 23 (EV 0x0006, P6) 재전송
+F07    15.93 ~ 18.20 us   RX_DATA:10, RX_ACK:2, TX_DATA:2, SW_TRIM:1          24 ~ 54   P1:2 P7:2 P2:1 P4:2 P5:1 P6:1
+                          └─ 17.50us SW_TRIM: xPU 2 → LS0->DST0 (P7) → xPU 0 | PSN 36 | EV 0x000f (ARRIVING_TRIM)
+F08    18.20 ~ 20.48 us   RX_DATA:7, RX_TRIM:1, TX_NACK:1, RX_ACK:3,          55 ~ 56   P6:1 P2:1
+                          TX_DATA:7
+                          └─ 18.51us RX_TRIM & TX_NACK: xPU 0 → xPU 2 | PSN 36 | EV 0x000f (P7)
+F09    20.48 ~ 22.75 us   RX_ACK:4, RX_DATA:2                                 -         P1:1 (수신/ACK 진행)
+F10    22.75 ~ 25.02 us   RX_DATA:9, RX_ACK:1, RX_NACK:1, TX_RTX:1            33 ~ 65   P5:2 P7:1 P6:2 P2:1 P1:2 P3:1
+                          └─ 24.15us RX_NACK: xPU 0 → xPU 2 | PSN 36 | EV 0x000f (P7)
+                          └─ 24.76us TX_RTX: PSN 36 (EV 0x000f, P7) 재전송
+F11    25.02 ~ 27.30 us   RX_ACK:4                                            -         (재전송 완료 후 잔여 ACK 수신)
+F12    27.30 ~ 29.57 us   RX_ACK:2                                            -         (잔여 ACK 수신)
+F13    29.57 ~ 31.85 us   (이벤트 없음)                                       -         -
+F14    31.85 ~ 34.12 us   (이벤트 없음)                                       -         -
+F15    34.12 ~ 36.40 us   (이벤트 없음 — Flow 15 전송 완료 이후 전체 종료 구간) -         -
+
+================================================================================
+3. Trim → NACK → Slow Down → RTX 핵심 이벤트 연대기 (Flow 15)
+================================================================================
+  시각(us)   이벤트     PSN   EV / Plane     위치 / 경로                                비고
+--------------------------------------------------------------------------------
+   0.33 us   TX_DATA     8    0x0009 (P1)    xPU 2 → xPU 0                             초기 cwnd=30 버스트
+   4.31 us   SW_TRIM     8    0x0009 (P1)    LS0->DST0(0) (xPU 2 → xPU 0)              ARRIVING_TRIM (큐=4 초과)
+   5.61 us   RX_TRIM     8    0x0009 (P1)    xPU 0 수신                                64B 헤더만 도착
+   5.61 us   TX_NACK     8    0x0009 (P1)    xPU 0 → xPU 2                             역방향 NACK 송출
+  10.89 us   RX_NACK     8    0x0009 (P1)    xPU 2 수신                                cwnd 축소 & RTX 큐 등록
+  12.20 us   TX_RTX      8    0x0009 (P1)    xPU 2 → xPU 0                             재전송 수행
+--------------------------------------------------------------------------------
+   4.59 us   TX_DATA    23    0x0006 (P6)    xPU 2 → xPU 0
+   8.90 us   SW_TRIM    23    0x0006 (P6)    LS0->DST0(0) (xPU 2 → xPU 0)              BOOTED_TRIM (큐=4 초과)
+   9.92 us   RX_TRIM    23    0x0006 (P6)    xPU 0 수신
+   9.92 us   TX_NACK    23    0x0006 (P6)    xPU 0 → xPU 2                             역방향 NACK 송출
+  14.22 us   RX_NACK    23    0x0006 (P6)    xPU 2 수신                                cwnd 축소 & RTX 큐 등록
+  14.50 us   TX_RTX     23    0x0006 (P6)    xPU 2 → xPU 0                             재전송 수행
+--------------------------------------------------------------------------------
+  13.19 us   TX_DATA    36    0x000f (P7)    xPU 2 → xPU 0
+  17.50 us   SW_TRIM    36    0x000f (P7)    LS0->DST0(0) (xPU 2 → xPU 0)              ARRIVING_TRIM (큐=4 초과)
+  18.51 us   RX_TRIM    36    0x000f (P7)    xPU 0 수신
+  18.51 us   TX_NACK    36    0x000f (P7)    xPU 0 → xPU 2                             역방향 NACK 송출
+  24.15 us   RX_NACK    36    0x000f (P7)    xPU 2 수신                                cwnd 축소 & RTX 큐 등록
+  24.76 us   TX_RTX     36    0x000f (P7)    xPU 2 → xPU 0                             재전송 수행
+
+================================================================================
+4. 상세 기술 분석
+================================================================================
+(1) 왜 F00~F02에 30개 송신 후 F03에서 TX가 0인가?
+    - Flow 15는 초기 윈도우 cwnd=30에 맞춰 F00(18) + F01(10) + F02(2) = 30개 패킷을
+      연속 송신한 뒤 윈도우가 가득 차 송신을 일시 정지합니다.
+    - F03(6.83~9.10us)은 패킷이 비어 있는 구간이 아니라, 먼저 보낸 패킷이 수신측(xPU 0)에
+      도착(RX_DATA:11)하고 스위치에서 Trim(PSN 23) 및 역방향 NACK이 돌아오는 RTT 대기 구간입니다.
+
+(2) Trim 발생 지점과 원인
+    - Flow 15에서 발생한 3건의 SW_TRIM(PSN 8 @ 4.31us, PSN 23 @ 8.90us, PSN 36 @ 17.50us)은
+      모두 목적지 ToR 다운링크인 `LS0->DST0(0)`에서 발생했습니다.
+    - All-to-All 트래픽 특성상 xPU 1~7이 동시에 xPU 0으로 전송하므로 `LS0->DST0` 출력 큐(Queue=4)가
+      일시적으로 포화되어 Trim(ARRIVING_TRIM / BOOTED_TRIM)이 발생했습니다.
+
+(3) NACK 전달 및 Slow Down 동작
+    - Trim된 64B 헤더가 목적지 xPU 0에 도착하면 즉시 역방향으로 `TX_NACK`을 송출(5.61us, 9.92us, 18.51us)하고,
+      약 4.3~5.6us(반환 RTT) 뒤 송신측 xPU 2가 `RX_NACK`을 수신(10.89us, 14.22us, 24.15us)합니다.
+    - `RX_NACK` 수신 후 송신 윈도우(cwnd)가 축소되어 F05~F08 구간의 구간당 송신량이 초기 18개 → 2~11개로
+      완만하게 줄어드는 Slow Down이 관찰됩니다.
+
+(4) 왜 EV Reroute 건수가 0건인가?
+    - 이번 실행은 물리 링크/노드 장애(Blackhole)가 없는 Queue=4 혼잡 테스트이므로,
+      `PSN 8`, `PSN 23`, `PSN 36`이 모두 `TX_RTX` 시 동일 EV(`0x0009`, `0x0006`, `0x000f`)로
+      재전송되어도 정상 복구(rc=0, 전체 66개 패킷 완주)되었습니다.
+    - 반면 특정 Plane/링크에 장애(Fail)를 주입하거나 대규모 혼잡이 누적될 경우 REPS가
+      문제 EV를 회피해 다른 건강한 EV/Plane으로 우회(Reroute)하게 됩니다.
