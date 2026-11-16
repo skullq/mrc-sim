@@ -4,6 +4,10 @@
 
 > 프로토콜 아키텍처·패킷 레이아웃·`TC-01 ~ TC-10` 전체 명세는 [SPEC.md](file:///root/mrc-sim/SPEC.md)를 참고하세요.
 
+### 대시보드 미리보기 (`Plane P2` 장애 + `SRv6 SRH` + `Flow 15` 집중 트래킹 & `RoCEv2 BTH/RETH` 패킷 뷰)
+![MRC-SIM 8-Plane Leaf-Spine 장애 주입 및 Flow 트래킹 화면](docs/images/topology_fault_srv6.png)
+![MRC-SIM Wireshark RoCEv2 BTH 및 16B RETH 헤더 분석기](docs/images/wireshark_rdma_header.png)
+
 ---
 
 ## 1. 설치, 빌드 및 서비스 실행

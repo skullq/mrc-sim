@@ -2,7 +2,7 @@
 *.a
 *.dat
 __pycache__/
-reports/custom_*
+reports/
 htsim/htsim/sim/datacenter/htsim_uec
 htsim/htsim/sim/build/
 idmap.txt
