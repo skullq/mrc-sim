@@ -6,7 +6,29 @@
 
 ---
 
-## 1. 서비스 실행 및 관리
+## 1. 설치, 빌드 및 서비스 실행
+
+### `htsim` 시뮬레이터 설치 및 빌드 (`htsim_uec`)
+이 프로젝트는 `SPCL HTSIM` (`https://github.com/spcl/HTSIM.git`) 기반 커스텀 `htsim`을 사용합니다. 소스만 있고 바이너리가 아직 빌드되지 않은 환경이라면 아래 순서로 빌드합니다.
+
+1. **필수 도구 및 Python 의존성 설치**:
+   - C++ 컴파일러(`g++` 또는 `clang++`), `cmake`, `python3` 필요
+   ```bash
+   cd /root/mrc-sim/htsim
+   pip install -r requirements.txt
+   ```
+2. **(별도 환경에서 원본 `htsim`을 새로 받을 경우)**:
+   ```bash
+   git clone https://github.com/spcl/HTSIM.git /root/mrc-sim/htsim
+   ```
+   > 현재 워크스페이스의 `/root/mrc-sim/htsim`에는 MRC 장애 주입/복구, 다중 Plane 및 패킷 트레이스 패치가 이미 반영되어 있습니다.
+3. **CMake 빌드 (`htsim_uec` 생성)**:
+   ```bash
+   cd /root/mrc-sim/htsim/htsim/sim
+   cmake -S . -B build
+   cmake --build build --parallel
+   ```
+   빌드가 완료되면 [htsim_uec](file:///root/mrc-sim/htsim/htsim/sim/datacenter/htsim_uec) 실행 바이너리가 생성됩니다.
 
 ### 웹 대시보드 실행 ([server.sh](file:///root/mrc-sim/scripts/server.sh) · [web_dashboard.py](file:///root/mrc-sim/scripts/web_dashboard.py))
 - **관리 스크립트 사용 (권장)**:
